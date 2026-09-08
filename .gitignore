@@ -3,3 +3,8 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# 测试代码/测试配置不入库（仓库只保留部署所需文件与说明文档；
+# 本地开发如需跑测试，测试文件与 vitest 配置见本地完整副本）
+test/
+vitest.config.ts

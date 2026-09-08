@@ -71,19 +71,16 @@ https://<你的域名>/dns-query?dns=<b64>  # GET，dns 参数为 base64url 编�
 ## 开发
 
 ```bash
+npm install
 npm run typecheck   # tsc --noEmit
-npm run test        # vitest（含 miniflare e2e，MSW 拦截上游）
-npm run check       # typecheck + test
 npm run dev         # wrangler dev 本地调试
+npm run deploy      # wrangler deploy（需已登录 Cloudflare）
 ```
 
-## 测试覆盖
-
-- `test/parse.test.ts` — DNS 报文解析（压缩指针、循环防护、OPT/ECS 定位）
-- `test/ecs.test.ts` — ECS 注入/替换/剥离、IP 截断、base64url
-- `test/classify.test.ts` — blocked/NXDOMAIN/rebind 分类、TTL 提取、合成 NXDOMAIN
-- `test/cache.test.ts` — 缓存键稳定性、LRU 字节淘汰、Cache API 往返
-- `test/e2e.test.ts` — 真实 worker：POST/GET、缓存命中（上游调用数=1）、鉴权 401、rebind、strict 取最严格、JSON API、health/config
+> 仓库只保留部署所需文件与说明文档：测试代码与 `vitest.config.ts` 不在库内
+> （见 `.gitignore`）。完整的测试套件（`test/`，70 个用例：parse/ecs/classify/cache
+> 单元 + MSW 拦截的 e2e）与运行方式见 [DESIGN.md](docs/DESIGN.md) 的「测试策略」，
+> 本地完整副本执行 `npm run check` 即可复现。
 
 ## License
 
