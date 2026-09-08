@@ -5,6 +5,7 @@
  */
 
 import { decodeName, readU16, readU32, writeU16, HEADER_LEN } from "./parse";
+import { parseSections, skipName, toView } from "./wire";
 
 export type ResponseKind = "ok" | "nxdomain" | "blocked" | "rebind" | "error";
 
@@ -160,4 +161,28 @@ export function buildSyntheticNxdomain(
   // Zero an/ns/ar counts (a query's counts are already 0; keep it explicit).
   for (const [at, ] of [[6, 0], [8, 0], [10, 0]] as const) writeU16(out, at, 0);
   return out;
+}
+
+const SOA_RR_TYPE = 6;
+
+/**
+ * Negative-caching TTL per RFC 2308: min(SOA TTL, SOA.MINIMUM) from the
+ * AUTHORITY section's SOA record. Returns null when no valid SOA is present —
+ * a negative answer without a usable SOA must NOT be cached.
+ */
+export function soaNegativeTtl(msg: Uint8Array): number | null {
+  const parsed = parseSections(msg);
+  if (!parsed) return null;
+  const view = toView(msg);
+  for (const rr of parsed.authority.rrs) {
+    if (rr.rrType !== SOA_RR_TYPE) continue;
+    // SOA RDATA: MNAME (name) + RNAME (name) + 5 × uint32
+    let o = skipName(view, rr.rdataOffset);
+    if (o === -1 || o >= rr.rdataOffset + rr.rdLength) return null;
+    o = skipName(view, o);
+    if (o === -1 || o + 20 > rr.rdataOffset + rr.rdLength) return null;
+    const minimum = view.getUint32(o + 16); // SERIAL REFRESH RETRY EXPIRE MINIMUM
+    return Math.min(rr.ttl, minimum);
+  }
+  return null;
 }
