@@ -116,6 +116,7 @@ async function route(
     if (cfg.jsonPath !== null && (path === cfg.jsonPath || path.startsWith(cfg.jsonPath + "/"))) {
       return await handleJson(request, cfg, cache, ctx, url);
     }
+    if (path === "/ip-info") return handleIpInfo(request);
     if (path === "/health") return handleHealth(request, cfg);
     if (path === "/config") return handleConfig(request, cfg);
     if (path === "/") return handleRoot(cfg);
@@ -501,6 +502,64 @@ function handleConfig(request: Request, cfg: Config): Response {
   return new Response(JSON.stringify(body, null, 2), {
     headers: { "content-type": "application/json", ...corsHeaders() },
   });
+}
+
+
+/** IP geolocation proxy (borrowed from CF-Workers-DoH /ip-info, adapted:
+ *  CF Workers fetch cannot use http:// — ip-api free tier is http-only, so
+ *  we proxy https://ipwho.is and normalize to the ip-api field shape the
+ *  frontend expects: status/country/countryCode/region/city/lat/lon/isp/as). */
+async function handleIpInfo(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const ip = url.searchParams.get("ip") ?? request.headers.get("cf-connecting-ip");
+  if (!ip) {
+    return new Response(JSON.stringify({ status: "fail", message: "IP参数未提供" }), {
+      status: 400,
+      headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders() },
+    });
+  }
+  try {
+    const resp = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
+      headers: { accept: "application/json" },
+      redirect: "manual",
+    });
+    if (resp.status >= 300) throw new Error(`HTTP ${resp.status}`);
+    const d = (await resp.json()) as {
+      success?: boolean;
+      country?: string;
+      country_code?: string;
+      region?: string;
+      city?: string;
+      latitude?: number;
+      longitude?: number;
+      connection?: { asn?: number; org?: string; isp?: string };
+    };
+    const out = {
+      status: d.success ? "success" : "fail",
+      country: d.country ?? "",
+      countryCode: d.country_code ?? "",
+      region: d.region ?? "",
+      city: d.city ?? "",
+      lat: d.latitude ?? 0,
+      lon: d.longitude ?? 0,
+      isp: d.connection?.isp ?? d.connection?.org ?? "",
+      org: d.connection?.org ?? "",
+      as: d.connection?.asn ? `AS${d.connection.asn} ${d.connection.org ?? ""}`.trim() : "",
+      query: ip,
+    };
+    return new Response(JSON.stringify(out), {
+      headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders() },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({
+        status: "fail",
+        message: `IP查询失败: ${err instanceof Error ? err.message : String(err)}`,
+        query: ip,
+      }),
+      { status: 502, headers: { "content-type": "application/json", ...corsHeaders() } },
+    );
+  }
 }
 
 function handleRoot(cfg: Config): Response {
