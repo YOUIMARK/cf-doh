@@ -193,7 +193,7 @@ export function renderHomepage(cfg: Config): Response {
     </div>
 
     <div class="beian-info">
-      <p><strong>DNS-over-HTTPS：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span id="currentDomain">...</span>${dohPath}</span></strong><br>基于 Cloudflare Workers 的 DoH (DNS over HTTPS) 解析服务 · v${version}</p>
+      <p>基于 Cloudflare Workers 的 DoH (DNS over HTTPS) 解析服务 · v${version}</p>
     </div>
   </div>
 
@@ -395,18 +395,8 @@ export function renderHomepage(cfg: Config): Response {
       document.getElementById('domain').addEventListener('input', function () {
         localStorage.setItem('lastDomain', this.value);
       });
-      document.getElementById('currentDomain').textContent = currentHost;
       var currentDohOption = document.getElementById('currentDohOption');
       if (currentDohOption) { currentDohOption.textContent = currentDohUrl + ' (当前站点)'; }
-      var dohUrlDisplay = document.getElementById('dohUrlDisplay');
-      if (dohUrlDisplay) {
-        dohUrlDisplay.addEventListener('click', function () {
-          navigator.clipboard.writeText(currentProtocol + '//' + currentHost + currentDohPath).then(function () {
-            dohUrlDisplay.classList.add('copied');
-            setTimeout(function () { dohUrlDisplay.classList.remove('copied'); }, 2000);
-          }).catch(function (err) { console.error('复制失败:', err); });
-        });
-      }
       // Get Json (original): open the selected DoH's raw dns-json in a new tab.
       document.getElementById('getJsonBtn').addEventListener('click', function () {
         var dohSelect = document.getElementById('dohSelect').value;
