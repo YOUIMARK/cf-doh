@@ -525,8 +525,10 @@ async function queryDnsJson(
   dohServer: string,
   domain: string,
   type: string,
-  timeoutMs: number,
 ): Promise<Record<string, unknown>> {
+  // Ported 1:1 from cmliu/CF-Workers-DoH `queryDns`: default fetch (follows
+  // redirects, no artificial timeout — the original has neither), trying
+  // several Accept header combinations.
   const dohUrl = new URL(dohServer);
   dohUrl.searchParams.set("name", domain);
   dohUrl.searchParams.set("type", type);
@@ -538,15 +540,13 @@ async function queryDnsJson(
   ];
   let lastError: Error | null = null;
   for (const headers of attempts) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const resp = await fetch(dohUrl.toString(), {
-        headers,
-        signal: controller.signal,
-        redirect: "manual",
-      });
+      const resp = await fetch(dohUrl.toString(), { headers });
       if (resp.ok) {
+        const contentType = resp.headers.get("content-type") || "";
+        if (contentType.includes("json") || contentType.includes("dns-json")) {
+          return (await resp.json()) as Record<string, unknown>;
+        }
         const text = await resp.text();
         try {
           return JSON.parse(text) as Record<string, unknown>;
@@ -554,11 +554,10 @@ async function queryDnsJson(
           throw new Error("无法解析响应为JSON");
         }
       }
-      lastError = new Error(`DoH 服务器返回错误 (${resp.status})`);
+      const errorText = await resp.text();
+      lastError = new Error(`DoH 服务器返回错误 (${resp.status}): ${errorText.substring(0, 200)}`);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-    } finally {
-      clearTimeout(timer);
     }
   }
   throw lastError ?? new Error("无法完成 DNS 查询");
@@ -588,9 +587,9 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
   try {
     if (type === "all") {
       const [a, aaaa, ns] = await Promise.all([
-        queryDnsJson(base, domain, "A", cfg.timeoutMs).catch(() => ({ Answer: [], Question: [] })),
-        queryDnsJson(base, domain, "AAAA", cfg.timeoutMs).catch(() => ({ Answer: [], Question: [] })),
-        queryDnsJson(base, domain, "NS", cfg.timeoutMs).catch(() => ({ Answer: [], Authority: [], Question: [] })),
+        queryDnsJson(base, domain, "A").catch(() => ({ Answer: [], Question: [] })),
+        queryDnsJson(base, domain, "AAAA").catch(() => ({ Answer: [], Question: [] })),
+        queryDnsJson(base, domain, "NS").catch(() => ({ Answer: [], Authority: [], Question: [] })),
       ]);
       const nsRecords: unknown[] = [];
       for (const r of (ns.Answer ?? []) as Array<{ type: number }>) if (r.type === 2) nsRecords.push(r);
@@ -615,7 +614,7 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
         headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() },
       });
     }
-    const result = await queryDnsJson(base, domain, type, cfg.timeoutMs);
+    const result = await queryDnsJson(base, domain, type);
     return new Response(JSON.stringify(result, null, 2), {
       headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() },
     });

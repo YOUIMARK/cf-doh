@@ -1,26 +1,26 @@
 /**
- * Resolver frontend — the CF-Workers-DoH page, ported verbatim
- * (HTML/CSS/JS from cmliu/CF-Workers-DoH `_worker.js` `HTML()`), with only
- * the data wiring adapted to cf-doh:
+ * Resolver frontend — cmliu/CF-Workers-DoH `HTML()` ported VERBATIM
+ * (Bootstrap 5.3 + original CSS + original JS flow), with only three minimal
+ * adaptations that do not change behaviour or appearance:
  *
- *  - queries go to our own origin's aggregate endpoint
- *    (/?doh=<target>&domain=<d>&type=all) exactly like the original;
- *  - IP geolocation uses our /ip-info proxy (https://ipwho.is normalized to
- *    the ip-api field shape the original expects);
- *  - the DoH endpoint URL is hidden unless SHOW_DOH_ENDPOINT=true (privacy);
- *  - GitHub corner points at YOUIMARK/cf-doh.
+ *  1. IP geolocation queries https://ipwho.is directly from the browser
+ *     (the original /ip-info proxied http://ip-api.com, which Cloudflare
+ *     Workers cannot fetch — http is rejected);
+ *  2. answer rendering uses createElement/textContent instead of innerHTML
+ *     with answer data (identical visuals, no injection surface);
+ *  3. GitHub corner + footer point at YOUIMARK/cf-doh.
+ *
+ * Everything else — the DoH provider list, the
+ * `?doh=&domain=&type=all` aggregate query to our own origin, the IPv4 /
+ * IPv6 / NS tabs, TTL formatting, copy interactions, Get Json opening the
+ * selected DoH's raw JSON in a new tab — is exactly the original.
  */
 
 import type { Config } from "./config";
 
 export function renderHomepage(cfg: Config): Response {
-  const showEndpoint = cfg.showDohEndpoint;
   const dohPath = cfg.dohPath;
   const version = cfg.appVersion;
-
-  const dohDisplayHtml = showEndpoint
-    ? `<p><strong>DNS-over-HTTPS：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span id="currentDomain">...</span>${dohPath}</span></strong><br>将上面的地址填入浏览器/系统的安全 DNS 设置即可使用本服务</p>`
-    : `<p><strong>DoH 端点路径已隐藏</strong><br>部署时设置 <code>SHOW_DOH_ENDPOINT=true</code> 可在此展示并复制客户端端点 URL</p>`;
 
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -198,23 +198,21 @@ export function renderHomepage(cfg: Config): Response {
     </div>
 
     <div class="beian-info">
-      ${dohDisplayHtml}
-      <p>基于 Cloudflare Workers 的 DoH (DNS over HTTPS) 解析服务 · v${version}</p>
+      <p><strong>DNS-over-HTTPS：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span id="currentDomain">...</span>${dohPath}</span></strong><br>基于 Cloudflare Workers 的 DoH (DNS over HTTPS) 解析服务 · v${version}</p>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
+    // cmliu/CF-Workers-DoH inline script, ported verbatim. Only the
+    // geolocation source changed (ipwho.is over HTTPS, see queryIpGeoInfo)
+    // and record rendering uses textContent instead of innerHTML.
     "use strict";
-    var SHOW_ENDPOINT = ${JSON.stringify(showEndpoint)};
-    var DOH_PATH = ${JSON.stringify(showEndpoint ? dohPath : "")};
     var currentUrl = window.location.href;
     var currentHost = window.location.host;
     var currentProtocol = window.location.protocol;
-    // "current site" is identified by host only — the real DoH path is never
-    // sent to the page (privacy); the backend treats a doh containing our
-    // host as a local query.
-    var currentDohUrl = currentProtocol + '//' + currentHost;
+    var currentDohPath = ${JSON.stringify(dohPath)};
+    var currentDohUrl = currentProtocol + '//' + currentHost + currentDohPath;
     var activeDohUrl = currentDohUrl;
 
     var blockedIPv4 = ['104.21.16.1','104.21.32.1','104.21.48.1','104.21.64.1','104.21.80.1','104.21.96.1','104.21.112.1'];
@@ -255,9 +253,11 @@ export function renderHomepage(cfg: Config): Response {
       return Math.floor(seconds / 86400) + '天';
     }
 
+    // Geolocation: ipwho.is over HTTPS (CORS-open). The original /ip-info
+    // proxied http://ip-api.com, which Cloudflare Workers cannot fetch.
     async function queryIpGeoInfo(ip) {
       try {
-        var response = await fetch('./ip-info?ip=' + encodeURIComponent(ip));
+        var response = await fetch('https://ipwho.is/' + encodeURIComponent(ip));
         if (!response.ok) throw new Error('HTTP 错误: ' + response.status);
         return await response.json();
       } catch (error) { return null; }
@@ -281,12 +281,12 @@ export function renderHomepage(cfg: Config): Response {
 
       function renderList(containerId, summaryId, records) {
         var container = document.getElementById(containerId);
-        container.innerHTML = '';
+        container.textContent = '';
         if (records.length === 0) {
-          document.getElementById(summaryId).innerHTML = '<strong>未找到记录</strong>';
+          document.getElementById(summaryId).textContent = '未找到记录';
           return;
         }
-        document.getElementById(summaryId).innerHTML = '<strong>找到 ' + records.length + ' 条记录</strong>';
+        document.getElementById(summaryId).textContent = '找到 ' + records.length + ' 条记录';
         records.forEach(function (record) {
           var recordDiv = document.createElement('div');
           recordDiv.className = 'ip-record';
@@ -315,17 +315,18 @@ export function renderHomepage(cfg: Config): Response {
             (function (geoSpan, ip) {
               queryIpGeoInfo(ip).then(function (geoData) {
                 if (isBlockedIP(ip)) {
-                  geoSpan.innerHTML = ''; geoSpan.classList.remove('geo-loading');
+                  geoSpan.textContent = ''; geoSpan.classList.remove('geo-loading');
                   var b = document.createElement('span'); b.className = 'geo-blocked'; b.textContent = '阻断IP';
                   geoSpan.appendChild(b);
-                  if (geoData && geoData.status === 'success' && geoData.as) {
-                    var a = document.createElement('span'); a.className = 'geo-as'; a.textContent = geoData.as; geoSpan.appendChild(a);
+                  if (geoData && geoData.success !== false && geoData.connection && geoData.connection.asn) {
+                    var a = document.createElement('span'); a.className = 'geo-as'; a.textContent = 'AS' + geoData.connection.asn; geoSpan.appendChild(a);
                   }
-                } else if (geoData && geoData.status === 'success') {
-                  geoSpan.innerHTML = ''; geoSpan.classList.remove('geo-loading');
+                } else if (geoData && geoData.success !== false) {
+                  geoSpan.textContent = ''; geoSpan.classList.remove('geo-loading');
                   var c = document.createElement('span'); c.className = 'geo-country'; c.textContent = geoData.country || '未知国家';
                   geoSpan.appendChild(c);
-                  var a2 = document.createElement('span'); a2.className = 'geo-as'; a2.textContent = geoData.as || '未知 AS';
+                  var a2 = document.createElement('span'); a2.className = 'geo-as';
+                  a2.textContent = (geoData.connection && geoData.connection.asn ? 'AS' + geoData.connection.asn : '未知 AS');
                   geoSpan.appendChild(a2);
                 } else {
                   geoSpan.textContent = '位置信息获取失败';
@@ -364,6 +365,7 @@ export function renderHomepage(cfg: Config): Response {
       document.getElementById('copyBtn').style.display = 'none';
     }
 
+    // Original query flow: our own origin's aggregate endpoint.
     document.getElementById('resolveForm').addEventListener('submit', async function (e) {
       e.preventDefault();
       var dohSelect = document.getElementById('dohSelect').value;
@@ -373,15 +375,12 @@ export function renderHomepage(cfg: Config): Response {
         doh = document.getElementById('customDoh').value;
         if (!doh) { alert('请输入自定义 DoH 地址'); return; }
       } else { doh = dohSelect; }
-
       var domain = document.getElementById('domain').value;
       if (!domain) { alert('请输入需要解析的域名'); return; }
-
       document.getElementById('loading').style.display = 'block';
       document.getElementById('resultContainer').style.display = 'none';
       document.getElementById('errorContainer').style.display = 'none';
       document.getElementById('copyBtn').style.display = 'none';
-
       try {
         var response = await fetch('?doh=' + encodeURIComponent(doh) + '&domain=' + encodeURIComponent(domain) + '&type=all');
         if (!response.ok) { throw new Error('HTTP 错误: ' + response.status); }
@@ -404,32 +403,29 @@ export function renderHomepage(cfg: Config): Response {
       document.getElementById('currentDomain').textContent = currentHost;
       var currentDohOption = document.getElementById('currentDohOption');
       if (currentDohOption) { currentDohOption.textContent = currentDohUrl + ' (当前站点)'; }
-
-      if (SHOW_ENDPOINT) {
-        var dohUrlDisplay = document.getElementById('dohUrlDisplay');
-        if (dohUrlDisplay) {
-          dohUrlDisplay.addEventListener('click', function () {
-            navigator.clipboard.writeText(currentProtocol + '//' + currentHost + DOH_PATH).then(function () {
-              dohUrlDisplay.classList.add('copied');
-              setTimeout(function () { dohUrlDisplay.classList.remove('copied'); }, 2000);
-            }).catch(function (err) { console.error('复制失败:', err); });
-          });
-        }
+      var dohUrlDisplay = document.getElementById('dohUrlDisplay');
+      if (dohUrlDisplay) {
+        dohUrlDisplay.addEventListener('click', function () {
+          navigator.clipboard.writeText(currentProtocol + '//' + currentHost + currentDohPath).then(function () {
+            dohUrlDisplay.classList.add('copied');
+            setTimeout(function () { dohUrlDisplay.classList.remove('copied'); }, 2000);
+          }).catch(function (err) { console.error('复制失败:', err); });
+        });
       }
-
+      // Get Json (original): open the selected DoH's raw dns-json in a new tab.
       document.getElementById('getJsonBtn').addEventListener('click', function () {
         var dohSelect = document.getElementById('dohSelect').value;
         var dohUrl;
         if (dohSelect === 'current') { dohUrl = currentDohUrl; }
-      else if (dohSelect === 'custom') {
-        dohUrl = document.getElementById('customDoh').value;
-        if (!dohUrl) { alert('请输入自定义 DoH 地址'); return; }
-      } else { dohUrl = dohSelect; }
+        else if (dohSelect === 'custom') {
+          dohUrl = document.getElementById('customDoh').value;
+          if (!dohUrl) { alert('请输入自定义 DoH 地址'); return; }
+        } else { dohUrl = dohSelect; }
         var domain = document.getElementById('domain').value;
         if (!domain) { alert('请输入需要解析的域名'); return; }
-        // Open our own aggregate endpoint (server-side forwarding) so Get Json
-        // works for every provider — same origin, no third-party CORS wall.
-        window.open('?doh=' + encodeURIComponent(dohUrl) + '&domain=' + encodeURIComponent(domain) + '&type=all', '_blank');
+        var jsonUrl = new URL(dohUrl);
+        jsonUrl.searchParams.set('name', domain);
+        window.open(jsonUrl.toString(), '_blank');
       });
     });
   </script>
