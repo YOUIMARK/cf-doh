@@ -15,7 +15,6 @@
  */
 
 import { HEADER_LEN } from "./dns/parse";
-import { rcode } from "./dns/classify";
 import { parseMediaType } from "./media";
 import { validateResponse } from "./dns/validate";
 import type { Config } from "./config";
@@ -26,13 +25,36 @@ export interface ResolveResult {
   provider: number;
 }
 
-const FAILOVER_RCODES = new Set([2, 5]); // SERVFAIL, REFUSED (low 4 bits)
+/** Platform subrequest budget headroom: 50/request cap, minus cache ops. */
+export const SUBREQUEST_BUDGET = 40;
+
+/**
+ * True when an upstream response should fail over to the next provider:
+ * SERVFAIL (2), REFUSED (5), or any EDNS(0) extended RCODE (≥16, e.g.
+ * BADVERS). Uses the FULL rcode — the low 4 bits alone would treat BADVERS
+ * as NOERROR (CF-014). NXDOMAIN (3) is a valid answer, never a failure.
+ */
+export function isFailoverRcode(rcode: number): boolean {
+  return rcode === 2 || rcode === 5 || rcode >= 16;
+}
+
+/**
+ * Total attempt budget for failover resolution: `providers × (maxRetries+1)`
+ * clamped to stay under the platform subrequest limit (CF-006). At least 1.
+ */
+export function computeAttemptBudget(providers: number, maxRetries: number): number {
+  const configured = Math.max(1, providers) * (Math.max(0, maxRetries) + 1);
+  return Math.max(1, Math.min(configured, SUBREQUEST_BUDGET));
+}
 
 export interface ResolveContext {
   providers: string[];
   timeoutMs: number;
   maxBody: number;
-  maxRetries: number;
+  /** Total attempts allowed across all providers (failover mode). */
+  attemptBudget: number;
+  /** Absolute wall-clock deadline (epoch ms) for the whole resolution. */
+  deadlineMs: number;
 }
 
 /** Error-safe URL for logs: strips query string and userinfo. */
@@ -79,7 +101,15 @@ export function buildUpstreamHeaders(
   return out;
 }
 
-/** One upstream attempt; resolves with a validated, fully-read response. */
+/**
+ * One upstream attempt; resolves with a validated, fully-read response.
+ *
+ * The timeout signal covers the ENTIRE attempt — fetch AND body read AND
+ * DNS validation — not just the header round-trip. `fetch()` resolving only
+ * means headers arrived; a slow-dripping body must not outlive the deadline
+ * (CF-005). Each attempt is also bounded by the resolution's total deadline:
+ * `attemptTimeout = min(timeoutMs, remaining)` (CF-007).
+ */
 async function tryProvider(
   providerUrl: string,
   requestMessage: Uint8Array,
@@ -88,8 +118,11 @@ async function tryProvider(
   accept: string,
   userAgent: string,
 ): Promise<ResolveResult | null> {
+  const remaining = ctx.deadlineMs - Date.now();
+  if (remaining <= 0) return null;
+  const attemptTimeout = Math.max(50, Math.min(ctx.timeoutMs, remaining));
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ctx.timeoutMs);
+  const timer = setTimeout(() => controller.abort(), attemptTimeout);
   const headers = buildUpstreamHeaders(accept, userAgent, method === "POST" ? accept : undefined);
 
   let url = providerUrl;
@@ -103,42 +136,42 @@ async function tryProvider(
     init = { method: "POST", headers, body: requestMessage, signal: controller.signal };
   }
 
-  let resp: Response;
   try {
     // redirect: "manual" + explicit 3xx check — Workers rejects "error";
     // never follow upstream redirects (SSRF guard).
-    resp = await fetch(url, { ...init, redirect: "manual" });
+    const resp = await fetch(url, { ...init, redirect: "manual" });
+
+    if (resp.status >= 300 && resp.status < 400) {
+      await resp.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    if (resp.status < 200 || resp.status >= 300) {
+      await resp.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const contentType = resp.headers.get("content-type") ?? "";
+    if (parseMediaType(contentType) !== "application/dns-message") {
+      await resp.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const declared = resp.headers.get("content-length");
+    if (declared && Number.parseInt(declared, 10) > ctx.maxBody) {
+      await resp.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    // Body read + validation happen INSIDE the timed region.
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (buf.byteLength < HEADER_LEN || buf.byteLength > ctx.maxBody) return null;
+    // Trust boundary: the response must validate AND echo the request sent.
+    const validated = validateResponse(buf, requestMessage);
+    if (!validated) return null;
+    if (isFailoverRcode(validated.rcode)) return null; // SERVFAIL/REFUSED/extended → next
+    return { body: buf, status: resp.status, provider: -1 };
   } catch {
-    return null; // network error / timeout
+    return null; // network error / timeout (fetch or body read)
   } finally {
     clearTimeout(timer);
   }
-
-  if (resp.status >= 300 && resp.status < 400) {
-    await resp.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  if (resp.status < 200 || resp.status >= 300) {
-    await resp.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  const contentType = resp.headers.get("content-type") ?? "";
-  if (parseMediaType(contentType) !== "application/dns-message") {
-    await resp.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  const declared = resp.headers.get("content-length");
-  if (declared && Number.parseInt(declared, 10) > ctx.maxBody) {
-    await resp.body?.cancel().catch(() => undefined);
-    return null;
-  }
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  if (buf.byteLength < HEADER_LEN || buf.byteLength > ctx.maxBody) return null;
-  // Trust boundary: the response must validate AND echo the request sent.
-  const validated = validateResponse(buf, requestMessage);
-  if (!validated) return null;
-  if (FAILOVER_RCODES.has(rcode(buf))) return null; // SERVFAIL/REFUSED → try next
-  return { body: buf, status: resp.status, provider: -1 };
 }
 
 /** Round-robin cursor (per isolate; serverless instances share nothing). */
@@ -146,19 +179,25 @@ let cursor = 0;
 
 /**
  * Default (failover) resolution: round-robin start point, sequential
- * failover; each provider gets up to `maxRetries + 1` attempts.
+ * failover; the total number of attempts is capped by `ctx.attemptBudget`
+ * (CF-006) and every attempt is bounded by the resolution deadline (CF-007).
  */
 export async function fetchCandidates(
   requestMessage: Uint8Array,
   ctx: ResolveContext,
 ): Promise<ResolveResult[]> {
   if (ctx.providers.length === 0) return [];
-  const attempts = Math.max(1, ctx.maxRetries + 1);
   const start = cursor % ctx.providers.length;
   cursor = (start + 1) % ctx.providers.length;
-  for (let i = 0; i < ctx.providers.length; i++) {
+  // Spread the attempt budget evenly across the providers actually tried so a
+  // failing first provider cannot exhaust the whole budget (CF-006).
+  const tryCount = Math.min(ctx.providers.length, ctx.attemptBudget);
+  const perProvider = Math.max(1, Math.floor(ctx.attemptBudget / tryCount));
+  let used = 0;
+  for (let i = 0; i < tryCount; i++) {
     const pi = (start + i) % ctx.providers.length;
-    for (let attempt = 0; attempt < attempts; attempt++) {
+    for (let attempt = 0; attempt < perProvider && used < ctx.attemptBudget; attempt++) {
+      used += 1;
       const r = await tryProvider(
         ctx.providers[pi]!,
         requestMessage,
@@ -168,6 +207,7 @@ export async function fetchCandidates(
         `cf-doh/${"1.0.0"}`,
       );
       if (r) return [{ ...r, provider: pi }];
+      if (ctx.deadlineMs - Date.now() <= 0) return [];
     }
   }
   return [];
@@ -238,7 +278,8 @@ export async function resolveCandidates(
     providers: upstreamPool,
     timeoutMs: cfg.timeoutMs,
     maxBody: cfg.maxBody,
-    maxRetries: cfg.maxRetries,
+    attemptBudget: computeAttemptBudget(upstreamPool.length, cfg.maxRetries),
+    deadlineMs: Date.now() + cfg.totalTimeoutMs,
   };
   if (cfg.mode === "strict") return fetchCandidatesStrict(requestMessage, ctx);
   if (cfg.raceUpstreams && ctx.providers.length > 1) {

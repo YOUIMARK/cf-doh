@@ -23,7 +23,7 @@ import {
   toView,
   type DnsHeader,
 } from "./wire";
-import { ecsStatus } from "./ecs";
+import { ecsStatus, queryEcsScopeValid } from "./ecs";
 
 export interface ValidatedResponse {
   header: DnsHeader;
@@ -41,7 +41,8 @@ export function validateQuery(msg: Uint8Array): boolean {
   if (!sections) return false;
   if (sections.additional.nextOffset !== msg.length) return false; // trailing garbage
   if (countOptRrs(msg) > 1) return false; // RFC 6891: at most one OPT
-  return ecsStatus(msg) !== "malformed";
+  if (ecsStatus(msg) === "malformed") return false;
+  return queryEcsScopeValid(msg); // RFC 7871: query ECS scope MUST be 0
 }
 
 /** Validates an upstream response; returns null when it cannot be trusted. */

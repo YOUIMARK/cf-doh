@@ -67,6 +67,36 @@ export function ecsStatus(msg: Uint8Array): EcsStatus {
   return "absent";
 }
 
+/**
+ * Query-side ECS rule (RFC 7871 §7.1.2): in a client QUERY the ECS SCOPE
+ * prefix length MUST be 0 — a nonzero scope is meaningless in a question and
+ * indicates a broken/hostile client. Responses legitimately carry scope > 0,
+ * so this check belongs to the query gate only. Returns true when there is no
+ * ECS to check or the message is structurally malformed (ecsStatus handles
+ * that separately).
+ */
+export function queryEcsScopeValid(msg: Uint8Array): boolean {
+  const parsed = parseSections(msg);
+  if (!parsed) return true;
+  const view = toView(msg);
+  for (const opt of parsed.additional.rrs) {
+    if (opt.rrType !== OPT_RR_TYPE) continue;
+    const end = opt.rdataOffset + opt.rdLength;
+    let o = opt.rdataOffset;
+    while (o + 4 <= end) {
+      const code = view.getUint16(o);
+      const len = view.getUint16(o + 2);
+      if (o + 4 + len > end) return true; // malformed tail → ecsStatus flags it
+      if (code === ECS_OPTION_CODE) {
+        if (len < 4) return true;
+        if (view.getUint8(o + 7) !== 0) return false; // scope must be 0 in a query
+      }
+      o += 4 + len;
+    }
+  }
+  return true;
+}
+
 /** Builds the ECS option wire bytes (option code + option data). */
 export function buildEcsOption(ip: IpAddress, prefixLength: number): Uint8Array {
   const bits = ip.family === FAMILY_IPV4 ? 32 : 128;

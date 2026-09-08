@@ -5,7 +5,7 @@
  */
 
 import { decodeName, readU16, readU32, writeU16, HEADER_LEN } from "./parse";
-import { parseSections, skipName, toView } from "./wire";
+import { extendedRcode, parseSections, skipName, toView } from "./wire";
 
 export type ResponseKind = "ok" | "nxdomain" | "blocked" | "rebind" | "error";
 
@@ -130,12 +130,16 @@ export function scanAnswers(msg: Uint8Array): AnswerSummary {
  * Classify a response. `rebindProtection` turns the "all answers are private
  * IPs" case into "rebind". Blocked (0.0.0.0/::) is always reported, even when
  * mixed with public answers (ad-blocking semantics).
+ *
+ * Uses the FULL RCODE including EDNS(0) extended bits — a response with e.g.
+ * BADVERS (16) must not be mistaken for NOERROR just because its low nibble
+ * is 0 (CF-014).
  */
 export function classifyResponse(
   msg: Uint8Array,
   rebindProtection: boolean,
 ): ResponseKind {
-  const rc = rcode(msg);
+  const rc = extendedRcode(msg);
   if (rc === 3) return "nxdomain";
   if (rc !== 0) return "error";
   const s = scanAnswers(msg);

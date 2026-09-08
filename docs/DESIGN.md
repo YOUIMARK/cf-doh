@@ -30,13 +30,13 @@
 
 ## 关键设计决策
 
-1. **双层缓存**：进程内有界 LRU（8 MB 字节预算，绝对过期时间）+ Cache API（按 DNS TTL 回填 `max-age`）。缓存键 = `sha256(name|qtype|qclass|mode|ecsBucket)`。命中不发上游请求 → 省 subrequest 与 CPU。
+1. **双层缓存**：进程内有界 LRU（8 MB 字节预算，绝对过期时间）+ Cache API（按 DNS TTL 回填 `max-age`）。缓存键（wire 路径）= `sha256(有效上游报文[2..] | provider | mode | ecsBucket)`——报文即键自动覆盖 RD/CD/EDNS/DO/任意 EDNS option 与 /v4 /v6 改写，排除 TXID 使缓存体可跨客户端共享；缓存体统一存 TXID=0，命中时恢复当前请求 ID。命中不发上游请求 → 省 subrequest 与 CPU。
 2. **最小解析**：只解题目名/qtype/qclass、OPT/ECS、答案区 TTL；不整包解码。
-3. **ECS 策略**：`off` 剥离客户端 ECS（隐私）；`on` 注入截断后的客户端 IP（或截断客户端自带 ECS），并按截断前缀分桶缓存。
-4. **缓存 TTL**：取答案最小 TTL，夹取 `TTL_FLOOR/CEIL`，可选抖动防雪崩；NXDOMAIN/合成阻断用负缓存 TTL。
+3. **ECS 策略**：`off` 剥离客户端 ECS（隐私，含默认）；`on` 注入截断后的客户端 IP（或截断客户端自带 ECS），并按截断前缀分桶缓存；query 的 ECS scope 必须为 0（RFC 7871），否则 400。
+4. **缓存 TTL**：取答案最小 TTL，上限夹取 `TTL_CEIL`，可选抖动防雪崩；`TTL_FLOOR` 不把新鲜度抬过权威 TTL（保留配置兼容，实际不生效）。负缓存只走 RFC 2308 SOA TTL；无 SOA 的 NXDOMAIN 与合成阻断一律 no-store（`NEG_TTL` 已删除）。
 5. **上游策略**：`failover`（顺序 + 重试，符合 6 连接限制）；`strict`（并行 fan-out ≤6，取最严格：blocked > NXDOMAIN > 主上游 > 首个可用）。
 6. **鉴权**：路径即密钥 + 可选 `AUTH_TOKEN`/`ADMIN_TOKEN`（常量时间比较）。
-7. **健壮性**：请求/响应 ≤64KB、错误不泄漏堆栈、SERVFAIL/REFUSED 触发 failover、rebind 防护、统一 CORS。
+7. **健壮性**：请求/响应 ≤64KB、错误不泄漏堆栈、SERVFAIL/REFUSED/extended RCODE 触发 failover、rebind 防护、统一 CORS；单次上游超时覆盖 fetch+body+校验，`TOTAL_TIMEOUT_MS` 约束整个解析，总尝试次数 clamp 到 40（50 subrequest 平台上限内留余量）。
 8. **反例**：不采用随机加权混用"拦截/不拦截"上游（doh-proxy-worker 教训），过滤必须是确定性的。
 
 ## 借鉴映射

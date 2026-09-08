@@ -28,16 +28,63 @@ export interface CacheKeyInfo {
   modeKey: string;
   /** "none" when ECS is off, else the truncated subnet bucket (hex). */
   ecsBucket: string;
+  /** Extra variance tag (e.g. the raw dns-json type string) — hashed in when set. */
+  typeTag?: string;
 }
 
 /** Canonical, deterministic cache key derived from the DNS query. */
 export async function makeCacheKeyStr(info: CacheKeyInfo): Promise<string> {
-  const raw = `${info.name}|${info.qtype}|${info.qclass}|${info.modeKey}|${info.ecsBucket}`;
+  const raw = `${info.name}|${info.qtype}|${info.qclass}|${info.modeKey}|${info.ecsBucket}${
+    info.typeTag ? `|${info.typeTag}` : ""
+  }`;
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(raw),
   );
   return toHex(new Uint8Array(digest)).slice(0, 40);
+}
+
+/**
+ * Cache key for the wire (RFC 8484) path: SHA-256 over the EXACT bytes that
+ * will be sent upstream minus the 16-bit transaction ID, plus the provider
+ * identity, mode and ECS bucket. Hashing the effective message bytes
+ * automatically captures every DNS semantic that can change the answer:
+ * RD/CD flags, EDNS version, DO bit, and any EDNS option (an unknown option
+ * yields a distinct key instead of sharing a cache entry). Excluding the
+ * transaction ID keeps cached responses shareable across clients (CF-002).
+ * `message` MUST be the post-ECS / post-family-rewrite bytes sent upstream.
+ */
+export async function makeWireCacheKey(
+  message: Uint8Array,
+  providerKey: string,
+  modeKey: string,
+  ecsBucket: string,
+): Promise<string> {
+  const te = new TextEncoder();
+  const body = message.subarray(2); // flags..end (skip transaction ID)
+  const parts = [te.encode(providerKey), te.encode("|"), te.encode(modeKey), te.encode("|"), te.encode(ecsBucket), te.encode("|"), body];
+  const total = parts.reduce((acc, p) => acc + p.byteLength, 0);
+  const raw = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    raw.set(p, off);
+    off += p.byteLength;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", raw);
+  return toHex(new Uint8Array(digest)).slice(0, 40);
+}
+
+/**
+ * Remaining freshness of a Cache API entry: `max-age` is the object's
+ * ORIGINAL freshness lifetime, not the time still left — the entry may have
+ * sat in the cache for `Age` seconds already. Returning max-age verbatim
+ * would "resurrect" nearly-expired entries (CF-008).
+ */
+export function remainingTtl(cacheControl: string, ageHeader: string): number {
+  const m = /max-age=(\d+)/.exec(cacheControl);
+  const maxAge = m ? Math.max(0, Number(m[1])) : 0;
+  const age = Number(ageHeader);
+  return Math.max(0, maxAge - (Number.isFinite(age) && age > 0 ? age : 0));
 }
 
 interface LruEntry extends CacheEntry {
@@ -117,8 +164,8 @@ export class DohCache {
       const resp = await caches.default.match(this.cacheUrl(key));
       if (!resp) return null;
       const cc = resp.headers.get("cache-control") ?? "";
-      const m = /max-age=(\d+)/.exec(cc);
-      const ttl = m ? Math.max(0, Number(m[1])) : 0;
+      const age = resp.headers.get("age") ?? "";
+      const ttl = remainingTtl(cc, age);
       const body = new Uint8Array(await resp.arrayBuffer());
       return { body, status: resp.status, ttl };
     } catch {

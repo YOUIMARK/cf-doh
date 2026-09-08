@@ -42,19 +42,20 @@ https://<你的域名>/dns-query?dns=<b64>  # GET，dns 参数为 base64url 编�
 | `DOH_PATH` | `/dns-query` | DoH 端点路径。**强烈建议改为带随机串的路径**（如 `/dns-query-kx92jf`），路径本身就是第一道防线 |
 | `JSON_PATH` | 空（关） | 启用 Google 风格 JSON API（如 `/resolve`） |
 | `JSON_UPSTREAM` | `https://dns.google/resolve` | JSON API 上游 |
-| `AUTH_TOKEN` | 空（关） | 设置后需 `Authorization: Bearer <token>`、`?token=` 或 `X-DOH-Token` |
-| `ADMIN_TOKEN` | 空（关） | 保护 `/config` 与 `/health` |
+| `AUTH_TOKEN` | 空（关） | 设置后需 `Authorization: Bearer <token>`、`?token=` 或 `X-DOH-Token`。**推荐使用 `Authorization: Bearer`**；`?token=` 会进入访问日志/浏览器历史/Referer，仅保留作兼容 |
+| `ADMIN_TOKEN` | 空（关） | 保护 `/config` 与 `/health`。公开部署请务必设置：为空 = 管理端点公开 |
 | `ECS` | `off` | `on` 时注入 EDNS Client Subnet（并截断）；`off` 时剥离客户端 ECS 不外泄 |
 | `ECS_V4` / `ECS_V6` | `24` / `56` | ECS 前缀长度 |
 | `MODE` | `failover` | `failover`（顺序，省连接）/ `strict`（并行 fan-out ≤6 上游，取最严格结果，适合过滤） |
 | `REBIND_PROTECTION` | `off` | `on` 时若响应全部指向私网 IP，则返回合成 NXDOMAIN |
-| `TTL_FLOOR` / `TTL_CEIL` | `0` / `86400` | 缓存 TTL 夹取范围（秒） |
+| `TTL_FLOOR` / `TTL_CEIL` | `0` / `86400` | 缓存 TTL 夹取范围（秒）。**`TTL_FLOOR` 不再把缓存新鲜度抬过 DNS 权威 TTL**（权威 TTL 是新鲜度上限）；保留该变量仅为配置兼容，建议保持 `0` |
 | `TTL_JITTER` | `0.1` | 0~1，缓存 TTL 抖动比例，防缓存雪崩 |
-| `NEG_TTL` | `15` | NXDOMAIN/合成阻断的负缓存 TTL |
-| `MAX_RETRIES` | `1` | 上游 5xx/网络错误/超时的额外重试次数 |
-| `TIMEOUT_MS` | `3000` | 上游超时 |
+| `MAX_RETRIES` | `1` | 上游 5xx/网络错误/超时的额外重试次数（总尝试数受 50 次 subrequest 平台上限约束，自动 clamp） |
+| `TIMEOUT_MS` | `3000` | 单次上游超时（覆盖 fetch + body 读取 + 校验） |
+| `TOTAL_TIMEOUT_MS` | `10000` | 整个解析（含 failover/重试）的总墙钟预算；每次尝试取 `min(TIMEOUT_MS, 剩余)` |
 | `MAX_BODY` | `65536` | DNS 报文大小上限（字节） |
 | `CACHE_MEM` | `8` | 进程内 LRU 字节预算（MB，1~64） |
+| `DOH_AGGREGATE_ALLOWLIST` | 空（开放） | 可选：逗号分隔的 hostname 白名单，限制首页 `/?doh=<目标>` 聚合端点可转发的目标。为空保持原版开放行为（前端自定义 DoH 选项可用）；设置后仅白名单内的 DoH 主机可被聚合查询 |
 | `ROOT_CONTENT` / `URL302` | 空 | 首页伪装（HTML 或 302 跳转） |
 | `DEBUG` | `off` | 开启 `X-DOH-*` 诊断响应头 |
 
@@ -78,7 +79,7 @@ npm run deploy      # wrangler deploy（需已登录 Cloudflare）
 ```
 
 > 仓库只保留部署所需文件与说明文档：测试代码与 `vitest.config.ts` 不在库内
-> （见 `.gitignore`）。完整的测试套件（`test/`，70 个用例：parse/ecs/classify/cache
+> （见 `.gitignore`）。完整的测试套件（`test/`，100+ 用例：parse/ecs/classify/cache/upstream
 > 单元 + MSW 拦截的 e2e）与运行方式见 [DESIGN.md](docs/DESIGN.md) 的「测试策略」，
 > 本地完整副本执行 `npm run check` 即可复现。
 

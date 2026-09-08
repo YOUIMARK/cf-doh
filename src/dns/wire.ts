@@ -152,6 +152,16 @@ export function setQuestionType(msg: Uint8Array, qtype: number): Uint8Array | nu
   return out;
 }
 
+/** Returns a copy of `msg` with the DNS transaction ID replaced (RFC 1035
+ *  §4.1.1). Used to canonicalize cached responses (store ID 0, restore the
+ *  requesting client's ID on a cache hit) so cached bytes never leak another
+ *  client's transaction ID. */
+export function withTransactionId(msg: Uint8Array, id: number): Uint8Array {
+  const out = msg.slice();
+  if (out.length >= 2) toView(out).setUint16(0, id & 0xffff);
+  return out;
+}
+
 /** Full RCODE including EDNS(0) extended-rcode bits (BADVERS = 16, …). */
 export function extendedRcode(msg: Uint8Array): number {
   const parsed = parseSections(msg);

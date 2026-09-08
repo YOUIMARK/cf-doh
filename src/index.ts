@@ -14,16 +14,15 @@
 
 import {
   parseConfig,
-  DEFAULT_POSITIVE_TTL,
   type Config,
   type Family,
 } from "./config";
-import { DohCache, makeCacheKeyStr } from "./cache";
+import { DohCache, makeCacheKeyStr, makeWireCacheKey } from "./cache";
 import { resolveCandidates, resolveProvider, type ResolveResult } from "./upstream";
 import { parseQuestion } from "./dns/parse";
 import { base64urlToBytes, getEcs, toHex, truncateIp } from "./dns/encode";
 import { buildSyntheticNxdomain, classifyResponse, scanAnswers, soaNegativeTtl } from "./dns/classify";
-import { buildErrorResponse, questionType, setQuestionType } from "./dns/wire";
+import { buildErrorResponse, extendedRcode, questionType, setQuestionType, withTransactionId } from "./dns/wire";
 import {
   addOrMergeEcs,
   buildEcsOption,
@@ -179,11 +178,15 @@ async function handleDoh(
     if (acceptsMessage) return jsonError(400, "missing dns parameter");
     return infoText(cfg);
   }
-  if (method === "GET" && !acceptsMessage) {
-    return jsonError(406, "Not Acceptable: application/dns-message required");
-  }
   if (method !== "GET" && method !== "POST") {
     return jsonError(405, "method not allowed");
+  }
+  // RFC 8484 media negotiation: an explicit Accept that excludes
+  // application/dns-message is a 406 for GET AND POST (CF-011). An absent
+  // Accept (or a wildcard like */*) stays allowed — DoH clients in the wild
+  // often send neither.
+  if (!acceptsMessage && (method === "GET" || accept !== "")) {
+    return jsonError(406, "Not Acceptable: application/dns-message required");
   }
 
   // ── Body acquisition with size caps ──
@@ -216,16 +219,17 @@ async function handleDoh(
   if (!q) return jsonError(400, "malformed dns message");
 
   // ── ECS handling (three-state, ported from vercel-doh) ──
+  // `cfg.ecs=false` (the default) means STRIP: a client-provided subnet must
+  // never reach an upstream when the operator opted out of ECS (CF-003).
+  // URL flags still override: /ecs forces enable, /no-ecs forces disable.
   const effectiveBehavior: EcsBehavior =
-    flags.behavior ?? (cfg.ecs ? "force_enable" : "default");
+    flags.behavior ?? (cfg.ecs ? "force_enable" : "force_disable");
 
   if (effectiveBehavior === "force_disable" && ecsStatus(message) !== "absent") {
     message = removeEcsOption(message); // STRIP, not merely skip injection
   }
 
-  const shouldAddEcs =
-    effectiveBehavior === "force_enable" ||
-    (effectiveBehavior === "default" && cfg.ecs);
+  const shouldAddEcs = effectiveBehavior === "force_enable";
   if (shouldAddEcs && ecsStatus(message) === "absent") {
     const overrideIp = flags.ecsOverrideIp ?? cfg.ecsOverrideIp;
     const sourceIp = overrideIp ? parseOverrideIp(overrideIp) : parseClientIp(request.headers);
@@ -250,25 +254,36 @@ async function handleDoh(
   }
 
   // ── Cache key + dual-layer lookup (GET + non-ECS only: privacy) ──
+  // Key = effective upstream bytes (post ECS / post family-rewrite) minus the
+  // transaction ID, plus the provider identity, mode and ECS bucket. This
+  // captures every answer-affecting dimension — RD/CD, EDNS DO/version, any
+  // EDNS option, the /v4 /v6 family rewrite, the provider pool — so unrelated
+  // queries can never share a cached response (CF-001). Computed lazily: only
+  // GET + non-ECS requests ever read or write the cache (POST is the common
+  // DoH client path and must not pay for a 64 KB hash).
   const ecs = getEcs(message);
   const bucket = ecsSensitive ? `${ecs?.family ?? 0}:${toHex(ecs?.address ?? new Uint8Array(0))}` : "none";
-  const cacheKey = await makeCacheKeyStr({
-    name: q.name,
-    qtype: q.qtype,
-    qclass: q.qclass,
-    modeKey: cfg.mode === "strict" ? "s" : "f",
-    ecsBucket: bucket,
-  });
+  const cacheable = method === "GET" && !ecsSensitive;
+  let cacheKey: string | null = null;
+  if (cacheable) {
+    const providerKey = flags.provider
+      ? (resolveProvider(cfg, flags.provider) ?? "")
+      : (ecsSensitive && cfg.ecsUpstreamUrls.length > 0 ? cfg.ecsUpstreamUrls : cfg.upstreamUrls).join("|");
+    cacheKey = await makeWireCacheKey(message, providerKey, cfg.mode === "strict" ? "s" : "f", bucket);
+  }
 
-  if (method === "GET" && !ecsSensitive) {
+  // The cached body is canonical (transaction ID 0); on a hit the current
+  // request's ID is restored so client B never receives client A's ID (CF-002).
+  const requestId = message.length >= 2 ? ((message[0]! << 8) | message[1]!) : 0;
+  if (cacheable && cacheKey !== null) {
     const local = cache.getLocal(cacheKey);
     if (local) {
-      return dnsResponse(local.body, local.ttl, debugHeaders(cfg, "hit", bucket, -1, local.ttl));
+      return dnsResponse(withTransactionId(local.body, requestId), local.ttl, debugHeaders(cfg, "hit", bucket, -1, local.ttl));
     }
     const remote = await cache.getRemote(cacheKey);
     if (remote) {
       cache.putLocal(cacheKey, remote);
-      return dnsResponse(remote.body, remote.ttl, debugHeaders(cfg, "hit", bucket, -1, remote.ttl));
+      return dnsResponse(withTransactionId(remote.body, requestId), remote.ttl, debugHeaders(cfg, "hit", bucket, -1, remote.ttl));
     }
   }
 
@@ -295,7 +310,9 @@ async function handleDoh(
     outBody = buildSyntheticNxdomain(message, q.questionEnd);
   }
 
-  const rcode = (outBody[3] ?? 0) & 0x0f;
+  // Full RCODE including EDNS(0) extended bits — the low nibble alone would
+  // turn BADVERS (16) into NOERROR and poison cache/decision logic (CF-014).
+  const rcode = extendedRcode(outBody);
   const minTtl = kind === "error" ? null : scanAnswers(winner.body).minTtl;
   const minAnswerTtl = minTtl === Infinity ? null : minTtl;
   const negTtl = soaNegativeTtl(outBody);
@@ -315,8 +332,11 @@ async function handleDoh(
   let internalTtl = 0;
   if (cacheControl !== "no-store") {
     const m = /s-maxage=(\d+)/.exec(cacheControl);
-    internalTtl = m ? Number(m[1]) : 0;
-    internalTtl = Math.min(cfg.ttlCeil, Math.max(cfg.ttlFloor, internalTtl));
+    const authoritativeTtl = m ? Number(m[1]) : 0;
+    // TTL_FLOOR must never raise freshness beyond the authoritative DNS TTL
+    // (CF-009): a floor above the resolver's TTL would serve stale answers
+    // past the record's real expiry. Effective TTL is capped at TTL_CEIL.
+    internalTtl = Math.min(cfg.ttlCeil, authoritativeTtl);
     if (internalTtl > 0 && cfg.ttlJitter > 0) {
       internalTtl = Math.max(1, Math.round(internalTtl * (1 - Math.random() * cfg.ttlJitter)));
     }
@@ -324,8 +344,10 @@ async function handleDoh(
 
   if (cfg.forceResponsePadding) outBody = padResponse(outBody);
 
-  if (internalTtl > 0) {
-    const entry = { body: outBody, status: 200, ttl: internalTtl };
+  if (internalTtl > 0 && cacheKey !== null) {
+    // Store the canonical response (transaction ID 0); the client-facing copy
+    // keeps the requesting client's ID (CF-002).
+    const entry = { body: withTransactionId(outBody, 0), status: 200, ttl: internalTtl };
     cache.putLocal(cacheKey, entry);
     ctx.waitUntil(cache.putRemote(cacheKey, entry));
   }
@@ -345,9 +367,13 @@ function parseOverrideIp(ip: string): ReturnType<typeof parseClientIp> {
 
 // ── dns-json API ───────────────────────────────────────────────────────────
 
-/** Google dns-json type names → wire type codes (JSON cache key dimension). */
+/** Google dns-json type names → wire type codes (JSON cache key dimension).
+ *  Modern RR types (SVCB/HTTPS, DNSSEC) included so their cache keys never
+ *  collapse onto unknown-type code 0 (CF-013). */
 const JSON_TYPE_CODES: Record<string, number> = {
-  A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, SRV: 33, CAA: 257, ANY: 255,
+  A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, SRV: 33,
+  DS: 43, RRSIG: 46, NSEC: 47, DNSKEY: 48, NSEC3: 50, TLSA: 52, SVCB: 64,
+  HTTPS: 65, URI: 256, CAA: 257, ANY: 255,
 };
 
 function jsonTypeCode(type: string): number {
@@ -371,12 +397,15 @@ async function handleJson(
   if (!name) return jsonError(400, "missing name parameter");
   const qtype = url.searchParams.get("type") ?? "A";
 
+  // The raw type string is hashed in so two different unknown type names can
+  // never share a cache entry through the sentinel code 0 (CF-013).
   const cacheKey = await makeCacheKeyStr({
     name: name.toLowerCase(),
     qtype: jsonTypeCode(qtype),
     qclass: 0,
     modeKey: "j",
     ecsBucket: "none",
+    typeTag: qtype.trim().toLowerCase(),
   });
   const local = cache.getLocal(cacheKey);
   if (local) {
@@ -393,50 +422,51 @@ async function handleJson(
   upstreamUrl.search = url.search;
   upstreamUrl.searchParams.delete("token"); // never leak our auth token upstream
 
+  // The timeout covers fetch AND body read (CF-005) — headers arriving is not
+  // the end of the attempt.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
-  let resp: Response;
   try {
     // redirect: "manual" + 3xx check — Workers rejects "error" (SSRF guard).
-    resp = await fetch(upstreamUrl.toString(), {
+    const resp = await fetch(upstreamUrl.toString(), {
       headers: { accept: DNS_JSON },
       signal: controller.signal,
       redirect: "manual",
     });
+    if (resp.status >= 300 && resp.status < 400) {
+      return jsonError(502, "upstream unavailable");
+    }
+    if (resp.status < 200 || resp.status >= 300) return jsonError(502, "upstream error");
+    const body = new Uint8Array(await resp.arrayBuffer());
+    if (body.byteLength > cfg.maxBody) return jsonError(502, "upstream response too large");
+
+    // TTL=0 (or missing/absent answers) means there is NO provable freshness:
+    // cache nothing instead of falling back to a default positive TTL (CF-012).
+    let ttl = 0;
+    try {
+      const j = JSON.parse(new TextDecoder().decode(body)) as {
+        Answer?: Array<{ TTL?: number }>;
+      };
+      if (Array.isArray(j.Answer) && j.Answer.length > 0) {
+        const ttls = j.Answer.map((a) => Number(a.TTL)).filter((n) => Number.isFinite(n) && n > 0);
+        if (ttls.length > 0) ttl = Math.min(...ttls);
+      }
+    } catch {
+      ttl = 0; // non-JSON upstream response → do not cache
+    }
+    ttl = Math.min(cfg.ttlCeil, ttl);
+
+    if (ttl > 0) {
+      const entry = { body, status: 200, ttl };
+      cache.putLocal(cacheKey, entry);
+      ctx.waitUntil(cache.putRemote(cacheKey, entry));
+    }
+    return jsonResponse(body, ttl, debugHeaders(cfg, "miss", "none", -1, ttl));
   } catch {
     return jsonError(502, "upstream unavailable");
   } finally {
     clearTimeout(timer);
   }
-  if (resp.status >= 300 && resp.status < 400) {
-    return jsonError(502, "upstream unavailable");
-  }
-  if (resp.status < 200 || resp.status >= 300) return jsonError(502, "upstream error");
-  const body = new Uint8Array(await resp.arrayBuffer());
-  if (body.byteLength > cfg.maxBody) return jsonError(502, "upstream response too large");
-
-  let ttl = DEFAULT_POSITIVE_TTL;
-  try {
-    const j = JSON.parse(new TextDecoder().decode(body)) as {
-      Answer?: Array<{ TTL?: number }>;
-    };
-    if (Array.isArray(j.Answer) && j.Answer.length > 0) {
-      const ttls = j.Answer.map((a) => Number(a.TTL)).filter((n) => Number.isFinite(n) && n > 0);
-      if (ttls.length > 0) ttl = Math.min(...ttls);
-    } else {
-      ttl = 0; // no TTL info → do not cache
-    }
-  } catch {
-    ttl = 0; // non-JSON upstream response → do not cache
-  }
-  ttl = Math.min(cfg.ttlCeil, Math.max(cfg.ttlFloor, ttl));
-
-  if (ttl > 0) {
-    const entry = { body, status: 200, ttl };
-    cache.putLocal(cacheKey, entry);
-    ctx.waitUntil(cache.putRemote(cacheKey, entry));
-  }
-  return jsonResponse(body, ttl, debugHeaders(cfg, "miss", "none", -1, ttl));
 }
 
 function jsonResponse(
@@ -496,10 +526,11 @@ function handleConfig(request: Request, cfg: Config): Response {
     ttlFloor: cfg.ttlFloor,
     ttlCeil: cfg.ttlCeil,
     ttlJitter: cfg.ttlJitter,
-    negTtl: cfg.negTtl,
     rebindProtection: cfg.rebindProtection,
     maxRetries: cfg.maxRetries,
     timeoutMs: cfg.timeoutMs,
+    totalTimeoutMs: cfg.totalTimeoutMs,
+    aggregateAllowlist: cfg.aggregateAllowlist,
     maxBody: cfg.maxBody,
     cacheMemBytes: cfg.cacheMemBytes,
     debug: cfg.debug,
@@ -585,6 +616,16 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
     try {
       const u = new URL(dohParam);
       if (u.protocol !== "https:") throw new Error("only https DoH targets are allowed");
+      // Optional hostname allowlist (DOH_AGGREGATE_ALLOWLIST). When set, the
+      // aggregate endpoint stops being an open HTTPS proxy: only listed hosts
+      // may be queried. Empty (default) keeps the original open behaviour so
+      // the frontend's custom DoH entry keeps working (CF-004).
+      if (cfg.aggregateAllowlist.length > 0) {
+        const host = u.hostname.toLowerCase();
+        if (!cfg.aggregateAllowlist.includes(host)) {
+          throw new Error(`DoH 地址不在白名单中: ${host}`);
+        }
+      }
       base = u.toString().replace(/\/$/, "");
     } catch (err) {
       return new Response(

@@ -60,8 +60,6 @@ export interface Config {
   ttlCeil: number;
   /** 0..1 jitter fraction applied to cache TTLs to avoid thundering herd. */
   ttlJitter: number;
-  /** Negative-cache TTL (NXDOMAIN without SOA, synthetic blocks). */
-  negTtl: number;
   /** failover = sequential, strict = parallel fan-out with most-restrictive pick. */
   mode: Mode;
   /** Replace responses whose answers are all private/loopback IPs with NXDOMAIN. */
@@ -70,10 +68,18 @@ export interface Config {
   maxRetries: number;
   /** Per-provider upstream timeout in milliseconds. */
   timeoutMs: number;
+  /** Total wall-clock budget for the whole resolution (all attempts). */
+  totalTimeoutMs: number;
   /** Maximum DNS message size accepted from clients and upstreams (bytes). */
   maxBody: number;
   /** In-memory LRU byte budget shared per isolate. */
   cacheMemBytes: number;
+  /**
+   * Optional hostname allowlist for the frontend aggregate endpoint
+   * (`/?doh=<target>`). Empty = current behaviour (any https target).
+   * The allowlist never changes the queryDnsJson fetch semantics.
+   */
+  aggregateAllowlist: string[];
   /** Homepage body when `ROOT_CONTENT` is set. */
   rootContent: string | null;
   /** Redirect target for `/` when set (takes precedence over ROOT_CONTENT). */
@@ -183,6 +189,18 @@ function parseMemMb(v: string | undefined): number {
   return num(v, 8, 1, 64) * 1024 * 1024;
 }
 
+/** Comma-separated hostname list (lowercased). Empty when unset/blank. */
+function parseHostList(v: string | undefined): string[] {
+  if (v === undefined || v.trim() === "") return [];
+  const out: string[] = [];
+  for (const item of v.split(",")) {
+    const s = item.trim().toLowerCase();
+    if (!s) continue;
+    out.push(s);
+  }
+  return out;
+}
+
 function parseOptionalIp(v: string | undefined): string | null {
   if (v === undefined || v.trim() === "") return null;
   const trimmed = v.trim();
@@ -222,13 +240,14 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
     ttlFloor: num(env["TTL_FLOOR"], 0, 0, 86400 * 7),
     ttlCeil: num(env["TTL_CEIL"], 86400, 1, 86400 * 7),
     ttlJitter: Math.min(1, Math.max(0, num(env["TTL_JITTER"], 0.1, 0, 1))),
-    negTtl: num(env["NEG_TTL"], 15, 0, 86400),
     mode: modeRaw as Mode,
     rebindProtection: bool(env["REBIND_PROTECTION"], false),
     maxRetries: num(env["MAX_RETRIES"], 1, 0, 10),
     timeoutMs: num(env["TIMEOUT_MS"], 3000, 100, 30000),
+    totalTimeoutMs: num(env["TOTAL_TIMEOUT_MS"], 10000, 100, 60000),
     maxBody: num(env["MAX_BODY"], 65536, 512, 1_048_576),
     cacheMemBytes: parseMemMb(env["CACHE_MEM"]),
+    aggregateAllowlist: parseHostList(env["DOH_AGGREGATE_ALLOWLIST"]),
     rootContent: env["ROOT_CONTENT"] && env["ROOT_CONTENT"].trim() !== "" ? env["ROOT_CONTENT"] : null,
     url302: env["URL302"] && env["URL302"].trim() !== "" ? env["URL302"] : null,
     debug: bool(env["DEBUG"], false),
