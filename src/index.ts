@@ -119,6 +119,12 @@ async function route(
     if (path === "/ip-info") return handleIpInfo(request);
     if (path === "/health") return handleHealth(request, cfg);
     if (path === "/config") return handleConfig(request, cfg);
+    // Original CF-Workers-DoH aggregate query: /?doh=&domain=&type=all
+    // (the frontend queries its own origin; the worker forwards to the
+    // selected DoH server with Google-style dns-json parameters).
+    if (path === "/" && url.searchParams.has("doh")) {
+      return await handleAggregateQuery(cfg, url);
+    }
     if (path === "/") return handleRoot(cfg);
     return jsonError(404, "not found");
   } catch (err) {
@@ -504,6 +510,122 @@ function handleConfig(request: Request, cfg: Config): Response {
   });
 }
 
+
+
+/**
+ * Original CF-Workers-DoH aggregate resolver, ported 1:1: query the selected
+ * DoH server with Google-style dns-json params (name/type), trying several
+ * Accept header combinations; type=all fans out to A + AAAA + NS and merges
+ * into { ipv4:{records}, ipv6:{records}, ns:{records} } for the frontend.
+ * When the target is the current site, queries go through our own JSON
+ * upstream instead. https-only target (SSRF guard) — otherwise behaviour
+ * matches the original.
+ */
+async function queryDnsJson(
+  dohServer: string,
+  domain: string,
+  type: string,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  const dohUrl = new URL(dohServer);
+  dohUrl.searchParams.set("name", domain);
+  dohUrl.searchParams.set("type", type);
+  const attempts: Array<Record<string, string>> = [
+    { accept: "application/dns-json" },
+    {},
+    { accept: "application/json" },
+    { accept: "application/dns-json", "user-agent": "Mozilla/5.0 DNS Client" },
+  ];
+  let lastError: Error | null = null;
+  for (const headers of attempts) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(dohUrl.toString(), {
+        headers,
+        signal: controller.signal,
+        redirect: "manual",
+      });
+      if (resp.ok) {
+        const text = await resp.text();
+        try {
+          return JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          throw new Error("无法解析响应为JSON");
+        }
+      }
+      lastError = new Error(`DoH 服务器返回错误 (${resp.status})`);
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError ?? new Error("无法完成 DNS 查询");
+}
+
+async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
+  const domain = url.searchParams.get("domain") || url.searchParams.get("name") || "www.google.com";
+  const dohParam = url.searchParams.get("doh") || "";
+  const type = url.searchParams.get("type") || "all";
+  const isLocal = dohParam.includes(url.host);
+  // Local target → our own dns-json upstream; remote target must be https.
+  let base: string;
+  if (isLocal) {
+    base = cfg.jsonUpstream ?? "https://dns.google/resolve";
+  } else {
+    try {
+      const u = new URL(dohParam);
+      if (u.protocol !== "https:") throw new Error("only https DoH targets are allowed");
+      base = u.toString().replace(/\/$/, "");
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ error: `无效的 DoH 地址: ${err instanceof Error ? err.message : String(err)}` }, null, 2),
+        { status: 400, headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() } },
+      );
+    }
+  }
+  try {
+    if (type === "all") {
+      const [a, aaaa, ns] = await Promise.all([
+        queryDnsJson(base, domain, "A", cfg.timeoutMs).catch(() => ({ Answer: [], Question: [] })),
+        queryDnsJson(base, domain, "AAAA", cfg.timeoutMs).catch(() => ({ Answer: [], Question: [] })),
+        queryDnsJson(base, domain, "NS", cfg.timeoutMs).catch(() => ({ Answer: [], Authority: [], Question: [] })),
+      ]);
+      const nsRecords: unknown[] = [];
+      for (const r of (ns.Answer ?? []) as Array<{ type: number }>) if (r.type === 2) nsRecords.push(r);
+      for (const r of (ns.Authority ?? []) as Array<{ type: number }>) if (r.type === 2 || r.type === 6) nsRecords.push(r);
+      const combined = {
+        Status: (a as { Status?: number }).Status || (aaaa as { Status?: number }).Status || (ns as { Status?: number }).Status || 0,
+        Question: [
+          ...((a as { Question?: unknown[] }).Question ?? []),
+          ...((aaaa as { Question?: unknown[] }).Question ?? []),
+          ...((ns as { Question?: unknown[] }).Question ?? []),
+        ],
+        Answer: [
+          ...((a as { Answer?: unknown[] }).Answer ?? []),
+          ...((aaaa as { Answer?: unknown[] }).Answer ?? []),
+          ...((ns as { Answer?: unknown[] }).Answer ?? []),
+        ],
+        ipv4: { records: (a as { Answer?: unknown[] }).Answer ?? [] },
+        ipv6: { records: (aaaa as { Answer?: unknown[] }).Answer ?? [] },
+        ns: { records: nsRecords },
+      };
+      return new Response(JSON.stringify(combined, null, 2), {
+        headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() },
+      });
+    }
+    const result = await queryDnsJson(base, domain, type, cfg.timeoutMs);
+    return new Response(JSON.stringify(result, null, 2), {
+      headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: `DNS 查询失败: ${err instanceof Error ? err.message : String(err)}`, doh: base, domain }, null, 2),
+      { status: 500, headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() } },
+    );
+  }
+}
 
 /** IP geolocation proxy (borrowed from CF-Workers-DoH /ip-info, adapted:
  *  CF Workers fetch cannot use http:// — ip-api free tier is http-only, so

@@ -1,12 +1,12 @@
 /**
- * Resolver frontend — directly borrowed from CF-Workers-DoH's HTML tool
- * (Bootstrap 5, dark gradient cards, IPv4/IPv6/NS tabs, IP geolocation,
- * copy-to-clipboard) and adapted for cf-doh:
+ * Resolver frontend — the CF-Workers-DoH page, ported verbatim
+ * (HTML/CSS/JS from cmliu/CF-Workers-DoH `_worker.js` `HTML()`), with only
+ * the data wiring adapted to cf-doh:
  *
- *  - queries go through this worker's dns-json API (parallel A/AAAA/NS) or
- *    straight to a selected public DoH JSON endpoint;
- *  - IP geolocation uses our /ip-info proxy (https://ipwho.is, normalized to
- *    the ip-api field shape the original frontend expects);
+ *  - queries go to our own origin's aggregate endpoint
+ *    (/?doh=<target>&domain=<d>&type=all) exactly like the original;
+ *  - IP geolocation uses our /ip-info proxy (https://ipwho.is normalized to
+ *    the ip-api field shape the original expects);
  *  - the DoH endpoint URL is hidden unless SHOW_DOH_ENDPOINT=true (privacy);
  *  - GitHub corner points at YOUIMARK/cf-doh.
  */
@@ -14,13 +14,12 @@
 import type { Config } from "./config";
 
 export function renderHomepage(cfg: Config): Response {
-  const jsonPath = cfg.jsonPath ?? "/dns-query-json";
   const showEndpoint = cfg.showDohEndpoint;
   const dohPath = cfg.dohPath;
   const version = cfg.appVersion;
 
-  const endpointHtml = showEndpoint
-    ? `<p><strong>DNS-over-HTTPS：<span id="dohUrlDisplay" class="copy-link" title="点击复制">${dohPath}</span></strong><br>将上面的地址填入浏览器/系统的安全 DNS 设置即可使用本服务</p>`
+  const dohDisplayHtml = showEndpoint
+    ? `<p><strong>DNS-over-HTTPS：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span id="currentDomain">...</span>${dohPath}</span></strong><br>将上面的地址填入浏览器/系统的安全 DNS 设置即可使用本服务</p>`
     : `<p><strong>DoH 端点路径已隐藏</strong><br>部署时设置 <code>SHOW_DOH_ENDPOINT=true</code> 可在此展示并复制客户端端点 URL</p>`;
 
   const html = `<!DOCTYPE html>
@@ -29,7 +28,7 @@ export function renderHomepage(cfg: Config): Response {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DNS-over-HTTPS Resolver · cf-doh</title>
+  <title>DNS-over-HTTPS Resolver</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
   <style>
     body {
@@ -39,7 +38,7 @@ export function renderHomepage(cfg: Config): Response {
       margin: 0;
       line-height: 1.6;
       background: url('https://cf-assets.www.cloudflare.com/dzlvafdwdttg/5B5shLB8bSKIyB9NJ6R1jz/87e7617be2c61603d46003cb3f1bd382/Hero-globe-bg-takeover-xxl.png'),
-        linear-gradient(135deg, rgba(253, 101, 60, 0.85) 0%, rgba(251, 152, 30, 0.85) 100%);
+        linear-gradient(135deg, rgba(253, 101, 60, 0.85) 0%, rgba(251,152,30, 0.85) 100%);
       background-size: cover;
       background-position: center center;
       background-repeat: no-repeat;
@@ -62,33 +61,26 @@ export function renderHomepage(cfg: Config): Response {
       -webkit-text-fill-color: transparent; -moz-text-fill-color: transparent;
       font-weight: 600; text-shadow: none;
     }
-    .card { margin-bottom: 20px; border: none; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-      background-color: rgba(255, 255, 255, 0.8); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+    .card { margin-bottom: 20px; border: none; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05); background-color: rgba(255, 255, 255, 0.8); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
     .card-header { background-color: rgba(255, 242, 235, 0.9); font-weight: 600; padding: 12px 20px; border-bottom: none; }
     .form-label { font-weight: 500; margin-bottom: 8px; color: rgb(70, 50, 40); }
     .form-select, .form-control { border-radius: 6px; padding: 10px; border: 1px solid rgba(253, 101, 60, 0.3); background-color: rgba(255, 255, 255, 0.9); }
     .btn-primary { background-color: rgb(253, 101, 60); border: none; border-radius: 6px; padding: 10px 20px; font-weight: 500; transition: all 0.2s ease; }
     .btn-primary:hover { background-color: rgb(230, 90, 50); transform: translateY(-1px); }
-    pre { background-color: rgba(255, 245, 240, 0.9); padding: 15px; border-radius: 6px; border: 1px solid rgba(253, 101, 60, 0.2);
-      white-space: pre-wrap; word-break: break-all; font-family: Consolas, Monaco, 'Andale Mono', monospace; font-size: 14px; max-height: 400px; overflow: auto; }
+    pre { background-color: rgba(255, 245, 240, 0.9); padding: 15px; border-radius: 6px; border: 1px solid rgba(253, 101, 60, 0.2); white-space: pre-wrap; word-break: break-all; font-family: Consolas, Monaco, 'Andale Mono', monospace; font-size: 14px; max-height: 400px; overflow: auto; }
     .loading { display: none; text-align: center; padding: 20px 0; }
-    .loading-spinner { border: 4px solid rgba(0, 0, 0, 0.1); border-left: 4px solid rgb(253, 101, 60); border-radius: 50%;
-      width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 0 auto 10px; }
+    .loading-spinner { border: 4px solid rgba(0, 0, 0, 0.1); border-left: 4px solid rgb(253, 101, 60); border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 0 auto 10px; }
     .badge { margin-left: 5px; font-size: 11px; vertical-align: middle; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     .error-message { color: #e63e00; margin-top: 10px; }
     .nav-tabs .nav-link { border-top-left-radius: 6px; border-top-right-radius: 6px; padding: 8px 16px; font-weight: 500; color: rgb(150, 80, 50); }
     .nav-tabs .nav-link.active { background-color: rgba(255, 245, 240, 0.8); border-bottom-color: rgba(255, 245, 240, 0.8); color: rgb(253, 101, 60); }
-    .tab-content { background-color: rgba(255, 245, 240, 0.8); border-radius: 0 0 6px 6px; padding: 15px;
-      border: 1px solid rgba(253, 101, 60, 0.2); border-top: none; }
-    .ip-record { padding: 5px 10px; margin-bottom: 5px; border-radius: 4px; background-color: rgba(255, 255, 255, 0.9);
-      border: 1px solid rgba(253, 101, 60, 0.15); }
+    .tab-content { background-color: rgba(255, 245, 240, 0.8); border-radius: 0 0 6px 6px; padding: 15px; border: 1px solid rgba(253, 101, 60, 0.2); border-top: none; }
+    .ip-record { padding: 5px 10px; margin-bottom: 5px; border-radius: 4px; background-color: rgba(255, 255, 255, 0.9); border: 1px solid rgba(253, 101, 60, 0.15); }
     .ip-record:hover { background-color: rgba(255, 235, 225, 0.9); }
-    .ip-address { font-family: monospace; font-weight: 600; min-width: 130px; color: rgb(80, 60, 50); cursor: pointer;
-      position: relative; transition: color 0.2s ease; display: inline-block; }
+    .ip-address { font-family: monospace; font-weight: 600; min-width: 130px; color: rgb(80, 60, 50); cursor: pointer; position: relative; transition: color 0.2s ease; display: inline-block; }
     .ip-address:hover { color: rgb(253, 101, 60); }
-    .ip-address:after { content: ''; position: absolute; left: 100%; top: 0; opacity: 0; white-space: nowrap;
-      font-size: 12px; color: rgb(253, 101, 60); transition: opacity 0.3s ease; }
+    .ip-address:after { content: ''; position: absolute; left: 100%; top: 0; opacity: 0; white-space: nowrap; font-size: 12px; color: rgb(253, 101, 60); transition: opacity 0.3s ease; font-family: 'Segoe UI', sans-serif; font-weight: normal; }
     .ip-address.copied:after { content: '✓ 已复制'; opacity: 1; }
     .result-summary { margin-bottom: 15px; padding: 10px; background-color: rgba(255, 235, 225, 0.8); border-radius: 6px; }
     .result-tabs { margin-bottom: 20px; }
@@ -130,17 +122,24 @@ export function renderHomepage(cfg: Config): Response {
             <label for="dohSelect" class="form-label">选择 DoH 地址:</label>
             <select id="dohSelect" class="form-select">
               <option value="current" selected id="currentDohOption">自动 (当前站点)</option>
-              <option value="https://cloudflare-dns.com/resolve">https://cloudflare-dns.com/resolve (Cloudflare)</option>
-              <option value="https://dns.google/resolve">https://dns.google/resolve (谷歌)</option>
               <option value="https://dns.alidns.com/resolve">https://dns.alidns.com/resolve (阿里)</option>
+              <option value="https://sm2.doh.pub/dns-query">https://sm2.doh.pub/dns-query (腾讯)</option>
+              <option value="https://doh.360.cn/resolve">https://doh.360.cn/resolve (360)</option>
+              <option value="https://cloudflare-dns.com/dns-query">https://cloudflare-dns.com/dns-query (Cloudflare)</option>
+              <option value="https://dns.google/resolve">https://dns.google/resolve (谷歌)</option>
               <option value="https://dns.adguard-dns.com/resolve">https://dns.adguard-dns.com/resolve (AdGuard)</option>
-              <option value="https://dns.quad9.net/dns-query">https://dns.quad9.net/dns-query (Quad9)</option>
+              <option value="https://dns.sb/dns-query">https://dns.sb/dns-query (DNS.SB)</option>
+              <option value="https://zero.dns0.eu/">https://zero.dns0.eu (dns0.eu)</option>
+              <option value="https://dns.nextdns.io">https://dns.nextdns.io (NextDNS)</option>
+              <option value="https://dns.rabbitdns.org/dns-query">https://dns.rabbitdns.org/dns-query (Rabbit DNS)</option>
+              <option value="https://basic.rethinkdns.com/">https://basic.rethinkdns.com (RethinkDNS)</option>
+              <option value="https://v.recipes/dns-query">https://v.recipes/dns-query (v.recipes DNS)</option>
               <option value="custom">自定义...</option>
             </select>
           </div>
           <div id="customDohContainer" class="mb-3" style="display:none;">
             <label for="customDoh" class="form-label">输入自定义 DoH 地址:</label>
-            <input type="text" id="customDoh" class="form-control" placeholder="https://example.com/resolve">
+            <input type="text" id="customDoh" class="form-control" placeholder="https://example.com/dns-query">
           </div>
           <div class="mb-3">
             <label for="domain" class="form-label">待解析域名:</label>
@@ -199,40 +198,55 @@ export function renderHomepage(cfg: Config): Response {
     </div>
 
     <div class="beian-info">
-      ${endpointHtml}
+      ${dohDisplayHtml}
       <p>基于 Cloudflare Workers 的 DoH (DNS over HTTPS) 解析服务 · v${version}</p>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-    // cf-doh resolver frontend (borrowed from CF-Workers-DoH, adapted for dns-json)
     "use strict";
-    var JSON_PATH = ${JSON.stringify(jsonPath)};
     var SHOW_ENDPOINT = ${JSON.stringify(showEndpoint)};
     var DOH_PATH = ${JSON.stringify(dohPath)};
+    var currentUrl = window.location.href;
     var currentHost = window.location.host;
     var currentProtocol = window.location.protocol;
+    // "current site" is identified by host only — the real DoH path is never
+    // sent to the page (privacy); the backend treats a doh containing our
+    // host as a local query.
+    var currentDohUrl = currentProtocol + '//' + currentHost;
+    var activeDohUrl = currentDohUrl;
 
-    // blocked-IP markers (Cloudflare 阻断IP)
-    var BLOCKED_V4 = ['104.21.16.1','104.21.32.1','104.21.48.1','104.21.64.1','104.21.80.1','104.21.96.1','104.21.112.1'];
-    var BLOCKED_V6 = ['2606:4700:3030::6815:1001','2606:4700:3030::6815:3001','2606:4700:3030::6815:7001','2606:4700:3030::6815:5001'];
-    function isBlockedIP(ip) { return BLOCKED_V4.indexOf(ip) >= 0 || BLOCKED_V6.indexOf(ip) >= 0; }
+    var blockedIPv4 = ['104.21.16.1','104.21.32.1','104.21.48.1','104.21.64.1','104.21.80.1','104.21.96.1','104.21.112.1'];
+    var blockedIPv6 = ['2606:4700:3030::6815:1001','2606:4700:3030::6815:3001','2606:4700:3030::6815:7001','2606:4700:3030::6815:5001'];
+    function isBlockedIP(ip) { return blockedIPv4.indexOf(ip) >= 0 || blockedIPv6.indexOf(ip) >= 0; }
 
-    // build a dns-json query URL for a DoH base
-    function jsonUrl(dohBase, domain, type) {
-      var u = new URL(dohBase);
-      u.searchParams.set('name', domain);
-      if (type) u.searchParams.set('type', type);
-      return u.toString();
+    function updateActiveDohDisplay() {
+      var dohSelect = document.getElementById('dohSelect');
+      if (dohSelect.value === 'current') { activeDohUrl = currentDohUrl; }
     }
+    updateActiveDohDisplay();
 
-    // resolve one type via dns-json
-    async function queryType(dohBase, domain, type) {
-      var res = await fetch(jsonUrl(dohBase, domain, type), { headers: { accept: 'application/dns-json' } });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
-    }
+    document.getElementById('dohSelect').addEventListener('change', function () {
+      var customContainer = document.getElementById('customDohContainer');
+      customContainer.style.display = (this.value === 'custom') ? 'block' : 'none';
+      if (this.value === 'current') { activeDohUrl = currentDohUrl; }
+      else if (this.value !== 'custom') { activeDohUrl = this.value; }
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', function () {
+      document.getElementById('domain').value = '';
+      document.getElementById('domain').focus();
+    });
+
+    document.getElementById('copyBtn').addEventListener('click', function () {
+      var resultText = document.getElementById('result').textContent;
+      navigator.clipboard.writeText(resultText).then(function () {
+        var originalText = this.textContent;
+        this.textContent = '已复制';
+        setTimeout(function () { this.textContent = originalText; }.bind(this), 2000);
+      }.bind(this)).catch(function (err) { console.error('无法复制文本: ', err); });
+    });
 
     function formatTTL(seconds) {
       if (seconds < 60) return seconds + '秒';
@@ -244,7 +258,7 @@ export function renderHomepage(cfg: Config): Response {
     async function queryIpGeoInfo(ip) {
       try {
         var response = await fetch('./ip-info?ip=' + encodeURIComponent(ip));
-        if (!response.ok) throw new Error('HTTP ' + response.status);
+        if (!response.ok) throw new Error('HTTP 错误: ' + response.status);
         return await response.json();
       } catch (error) { return null; }
     }
@@ -256,80 +270,88 @@ export function renderHomepage(cfg: Config): Response {
       }).catch(function (err) { console.error('复制失败:', err); });
     }
 
-    // geo enrichment for a record row (A/AAAA only)
-    function enrichGeo(recordDiv, ip) {
-      var geoInfoSpan = recordDiv.querySelector('.geo-info');
-      if (!geoInfoSpan) return;
-      queryIpGeoInfo(ip).then(function (geoData) {
-        if (isBlockedIP(ip)) {
-          geoInfoSpan.innerHTML = '';
-          geoInfoSpan.classList.remove('geo-loading');
-          var b = document.createElement('span'); b.className = 'geo-blocked'; b.textContent = '阻断IP';
-          geoInfoSpan.appendChild(b);
-          if (geoData && geoData.status === 'success' && geoData.as) {
-            var a = document.createElement('span'); a.className = 'geo-as'; a.textContent = geoData.as; geoInfoSpan.appendChild(a);
-          }
-        } else if (geoData && geoData.status === 'success') {
-          geoInfoSpan.innerHTML = '';
-          geoInfoSpan.classList.remove('geo-loading');
-          var c = document.createElement('span'); c.className = 'geo-country'; c.textContent = geoData.country || '未知国家';
-          geoInfoSpan.appendChild(c);
-          var a2 = document.createElement('span'); a2.className = 'geo-as'; a2.textContent = geoData.as || '未知 AS';
-          geoInfoSpan.appendChild(a2);
-        } else {
-          geoInfoSpan.textContent = '位置信息获取失败';
-        }
-      });
-    }
-
-    function recordRow(record) {
-      var div = document.createElement('div');
-      div.className = 'ip-record';
-      var copy = document.createElement('span');
-      copy.className = 'ip-address'; copy.setAttribute('data-copy', record.data || record.name || '');
-      copy.textContent = record.data || record.name || '-';
-      copy.addEventListener('click', function () { handleCopyClick(this, this.getAttribute('data-copy')); });
-      var badge = document.createElement('span'); badge.className = 'badge bg-secondary'; badge.textContent = record.type || '-';
-      var ttl = document.createElement('span'); ttl.className = 'text-muted ttl-info';
-      ttl.textContent = 'TTL: ' + (record.TTL != null ? formatTTL(record.TTL) : '-');
-      var wrap = document.createElement('div'); wrap.className = 'd-flex justify-content-between align-items-center';
-      wrap.appendChild(copy);
-      if (record.type === 1 || record.type === 28) {
-        badge.className = 'badge ' + (record.type === 1 ? 'bg-primary' : 'bg-info');
-        badge.textContent = record.type === 1 ? 'A' : 'AAAA';
-        var geo = document.createElement('span'); geo.className = 'geo-info geo-loading'; geo.textContent = '正在获取位置信息...';
-        wrap.appendChild(geo); wrap.appendChild(ttl);
-        div.appendChild(wrap); div.appendChild(document.createElement('div'));
-        enrichGeo(div, record.data);
-        return div;
-      }
-      if (record.type === 5) { badge.className = 'badge bg-success'; badge.textContent = 'CNAME'; }
-      else if (record.type === 2) { badge.className = 'badge bg-info'; badge.textContent = 'NS'; }
-      else if (record.type === 6) { badge.className = 'badge bg-warning'; badge.textContent = 'SOA'; }
-      else if (record.type === 15) { badge.className = 'badge bg-secondary'; badge.textContent = 'MX'; }
-      else if (record.type === 16) { badge.className = 'badge bg-secondary'; badge.textContent = 'TXT'; }
-      wrap.appendChild(badge); wrap.appendChild(ttl);
-      div.appendChild(wrap);
-      return div;
-    }
-
-    // display standard dns-json responses, grouped into IPv4 / IPv6 / NS tabs
     function displayRecords(data) {
       document.getElementById('resultContainer').style.display = 'block';
       document.getElementById('errorContainer').style.display = 'none';
       document.getElementById('result').textContent = JSON.stringify(data, null, 2);
-      var answers = data.Answer || [];
-      var ipv4 = answers.filter(function (r) { return r.type === 1 || r.type === 5; });
-      var ipv6 = answers.filter(function (r) { return r.type === 28 || r.type === 5; });
-      var ns = answers.filter(function (r) { return r.type !== 1 && r.type !== 28 && r.type !== 5; });
-      function fill(id, summaryId, list) {
-        var box = document.getElementById(id); box.innerHTML = '';
-        document.getElementById(summaryId).textContent = list.length ? '找到 ' + list.length + ' 条记录' : '未找到记录';
-        list.forEach(function (r) { box.appendChild(recordRow(r)); });
+
+      var ipv4Records = (data.ipv4 && data.ipv4.records) || [];
+      var ipv6Records = (data.ipv6 && data.ipv6.records) || [];
+      var nsRecords = (data.ns && data.ns.records) || [];
+
+      function renderList(containerId, summaryId, records) {
+        var container = document.getElementById(containerId);
+        container.innerHTML = '';
+        if (records.length === 0) {
+          document.getElementById(summaryId).innerHTML = '<strong>未找到记录</strong>';
+          return;
+        }
+        document.getElementById(summaryId).innerHTML = '<strong>找到 ' + records.length + ' 条记录</strong>';
+        records.forEach(function (record) {
+          var recordDiv = document.createElement('div');
+          recordDiv.className = 'ip-record';
+          var top = document.createElement('div');
+          top.className = 'd-flex justify-content-between align-items-center';
+          var ipSpan = document.createElement('span');
+          ipSpan.className = 'ip-address';
+          ipSpan.setAttribute('data-copy', record.data || record.name || '');
+          ipSpan.textContent = record.data || record.name || '-';
+          ipSpan.addEventListener('click', function () { handleCopyClick(this, this.getAttribute('data-copy')); });
+          top.appendChild(ipSpan);
+
+          if (record.type === 5) {
+            var cnameBadge = document.createElement('span'); cnameBadge.className = 'badge bg-success'; cnameBadge.textContent = 'CNAME';
+            top.appendChild(cnameBadge);
+          } else if (record.type === 1 || record.type === 28) {
+            var typeBadge = document.createElement('span');
+            typeBadge.className = 'badge ' + (record.type === 1 ? 'bg-primary' : 'bg-info');
+            typeBadge.textContent = record.type === 1 ? 'A' : 'AAAA';
+            top.appendChild(typeBadge);
+            var geo = document.createElement('span');
+            geo.className = 'geo-info geo-loading'; geo.textContent = '正在获取位置信息...';
+            top.appendChild(geo);
+            (function (geoSpan, ip) {
+              queryIpGeoInfo(ip).then(function (geoData) {
+                if (isBlockedIP(ip)) {
+                  geoSpan.innerHTML = ''; geoSpan.classList.remove('geo-loading');
+                  var b = document.createElement('span'); b.className = 'geo-blocked'; b.textContent = '阻断IP';
+                  geoSpan.appendChild(b);
+                  if (geoData && geoData.status === 'success' && geoData.as) {
+                    var a = document.createElement('span'); a.className = 'geo-as'; a.textContent = geoData.as; geoSpan.appendChild(a);
+                  }
+                } else if (geoData && geoData.status === 'success') {
+                  geoSpan.innerHTML = ''; geoSpan.classList.remove('geo-loading');
+                  var c = document.createElement('span'); c.className = 'geo-country'; c.textContent = geoData.country || '未知国家';
+                  geoSpan.appendChild(c);
+                  var a2 = document.createElement('span'); a2.className = 'geo-as'; a2.textContent = geoData.as || '未知 AS';
+                  geoSpan.appendChild(a2);
+                } else {
+                  geoSpan.textContent = '位置信息获取失败';
+                }
+              });
+            })(geo, record.data);
+          } else if (record.type === 2) {
+            var nsBadge = document.createElement('span'); nsBadge.className = 'badge bg-info'; nsBadge.textContent = 'NS';
+            top.appendChild(nsBadge);
+          } else if (record.type === 6) {
+            var soaBadge = document.createElement('span'); soaBadge.className = 'badge bg-warning'; soaBadge.textContent = 'SOA';
+            top.appendChild(soaBadge);
+          } else {
+            var otherBadge = document.createElement('span'); otherBadge.className = 'badge bg-secondary'; otherBadge.textContent = '类型: ' + record.type;
+            top.appendChild(otherBadge);
+          }
+          var ttlSpan = document.createElement('span');
+          ttlSpan.className = 'text-muted ttl-info';
+          ttlSpan.textContent = 'TTL: ' + (record.TTL != null ? formatTTL(record.TTL) : '-');
+          top.appendChild(ttlSpan);
+          recordDiv.appendChild(top);
+          container.appendChild(recordDiv);
+        });
       }
-      fill('ipv4Records', 'ipv4Summary', ipv4);
-      fill('ipv6Records', 'ipv6Summary', ipv6);
-      fill('nsRecords', 'nsSummary', ns);
+
+      renderList('ipv4Records', 'ipv4Summary', ipv4Records);
+      renderList('ipv6Records', 'ipv6Summary', ipv6Records);
+      renderList('nsRecords', 'nsSummary', nsRecords);
       document.getElementById('copyBtn').style.display = 'block';
     }
 
@@ -340,30 +362,30 @@ export function renderHomepage(cfg: Config): Response {
       document.getElementById('copyBtn').style.display = 'none';
     }
 
-    // resolve: current site → our dns-json (parallel A/AAAA/NS); public DoH → direct
     document.getElementById('resolveForm').addEventListener('submit', async function (e) {
       e.preventDefault();
       var dohSelect = document.getElementById('dohSelect').value;
-      var base;
-      if (dohSelect === 'current') base = JSON_PATH;
+      var doh;
+      if (dohSelect === 'current') { doh = currentDohUrl; }
       else if (dohSelect === 'custom') {
-        base = document.getElementById('customDoh').value;
-        if (!base) { alert('请输入自定义 DoH 地址'); return; }
-      } else base = dohSelect;
+        doh = document.getElementById('customDoh').value;
+        if (!doh) { alert('请输入自定义 DoH 地址'); return; }
+      } else { doh = dohSelect; }
+
       var domain = document.getElementById('domain').value;
       if (!domain) { alert('请输入需要解析的域名'); return; }
+
       document.getElementById('loading').style.display = 'block';
       document.getElementById('resultContainer').style.display = 'none';
       document.getElementById('errorContainer').style.display = 'none';
       document.getElementById('copyBtn').style.display = 'none';
+
       try {
-        var results = await Promise.all([
-          queryType(base, domain, 'A').catch(function () { return { Answer: [] }; }),
-          queryType(base, domain, 'AAAA').catch(function () { return { Answer: [] }; }),
-          queryType(base, domain, 'NS').catch(function () { return { Answer: [] }; })
-        ]);
-        var merged = { Question: [{ name: domain }], Answer: results[0].Answer.concat(results[1].Answer, results[2].Answer) };
-        displayRecords(merged);
+        var response = await fetch('?doh=' + encodeURIComponent(doh) + '&domain=' + encodeURIComponent(domain) + '&type=all');
+        if (!response.ok) { throw new Error('HTTP 错误: ' + response.status); }
+        var json = await response.json();
+        if (json.error) { displayError(json.error); }
+        else { displayRecords(json); }
       } catch (error) {
         displayError('查询失败: ' + error.message);
       } finally {
@@ -371,43 +393,42 @@ export function renderHomepage(cfg: Config): Response {
       }
     });
 
-    document.getElementById('clearBtn').addEventListener('click', function () {
-      document.getElementById('domain').value = '';
-      document.getElementById('domain').focus();
-    });
-
-    document.getElementById('copyBtn').addEventListener('click', function () {
-      var text = document.getElementById('result').textContent;
-      navigator.clipboard.writeText(text).then(function () {
-        var self = this; self.textContent = '已复制'; setTimeout(function () { self.textContent = '复制结果'; }, 2000);
-      }.bind(this)).catch(function () {});
-    });
-
-    document.getElementById('getJsonBtn').addEventListener('click', function () {
-      var dohSelect = document.getElementById('dohSelect').value;
-      var base = dohSelect === 'current' ? JSON_PATH : (dohSelect === 'custom' ? document.getElementById('customDoh').value : dohSelect);
-      var domain = document.getElementById('domain').value;
-      if (!domain) { alert('请输入需要解析的域名'); return; }
-      window.open(jsonUrl(base, domain, null), '_blank');
-    });
-
     document.addEventListener('DOMContentLoaded', function () {
-      var last = localStorage.getItem('lastDomain');
-      if (last) document.getElementById('domain').value = last;
-      document.getElementById('domain').addEventListener('input', function () { localStorage.setItem('lastDomain', this.value); });
+      var lastDomain = localStorage.getItem('lastDomain');
+      if (lastDomain) { document.getElementById('domain').value = lastDomain; }
+      document.getElementById('domain').addEventListener('input', function () {
+        localStorage.setItem('lastDomain', this.value);
+      });
+      document.getElementById('currentDomain').textContent = currentHost;
+      var currentDohOption = document.getElementById('currentDohOption');
+      if (currentDohOption) { currentDohOption.textContent = currentDohUrl + ' (当前站点)'; }
+
       if (SHOW_ENDPOINT) {
-        var cur = document.getElementById('currentDohOption');
-        if (cur) cur.textContent = currentProtocol + '//' + currentHost + DOH_PATH + ' (当前站点)';
-        var disp = document.getElementById('dohUrlDisplay');
-        if (disp) {
-          disp.textContent = currentProtocol + '//' + currentHost + DOH_PATH;
-          disp.addEventListener('click', function () {
+        var dohUrlDisplay = document.getElementById('dohUrlDisplay');
+        if (dohUrlDisplay) {
+          dohUrlDisplay.addEventListener('click', function () {
             navigator.clipboard.writeText(currentProtocol + '//' + currentHost + DOH_PATH).then(function () {
-              disp.classList.add('copied'); setTimeout(function () { disp.classList.remove('copied'); }, 2000);
-            }).catch(function () {});
+              dohUrlDisplay.classList.add('copied');
+              setTimeout(function () { dohUrlDisplay.classList.remove('copied'); }, 2000);
+            }).catch(function (err) { console.error('复制失败:', err); });
           });
         }
       }
+
+      document.getElementById('getJsonBtn').addEventListener('click', function () {
+        var dohSelect = document.getElementById('dohSelect').value;
+        var dohUrl;
+        if (dohSelect === 'current') { dohUrl = currentDohUrl; }
+        else if (dohSelect === 'custom') {
+          dohUrl = document.getElementById('customDoh').value;
+          if (!dohUrl) { alert('请输入自定义 DoH 地址'); return; }
+        } else { dohUrl = dohSelect; }
+        var domain = document.getElementById('domain').value;
+        if (!domain) { alert('请输入需要解析的域名'); return; }
+        var jsonUrl = new URL(dohUrl);
+        jsonUrl.searchParams.set('name', domain);
+        window.open(jsonUrl.toString(), '_blank');
+      });
     });
   </script>
 </body>
