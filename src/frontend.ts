@@ -207,7 +207,8 @@ export function renderHomepage(cfg: Config): Response {
   <script>
     "use strict";
     var SHOW_ENDPOINT = ${JSON.stringify(showEndpoint)};
-    var DOH_PATH = ${JSON.stringify(dohPath)};
+    var DOH_PATH = ${JSON.stringify(showEndpoint ? dohPath : "")};
+    var JSON_PATH = ${JSON.stringify(cfg.jsonPath ?? "")};
     var currentUrl = window.location.href;
     var currentHost = window.location.host;
     var currentProtocol = window.location.protocol;
@@ -418,11 +419,15 @@ export function renderHomepage(cfg: Config): Response {
       document.getElementById('getJsonBtn').addEventListener('click', function () {
         var dohSelect = document.getElementById('dohSelect').value;
         var dohUrl;
-        if (dohSelect === 'current') { dohUrl = currentDohUrl; }
-        else if (dohSelect === 'custom') {
-          dohUrl = document.getElementById('customDoh').value;
-          if (!dohUrl) { alert('请输入自定义 DoH 地址'); return; }
-        } else { dohUrl = dohSelect; }
+        if (dohSelect === 'current') {
+        if (JSON_PATH) { dohUrl = currentProtocol + '//' + currentHost + JSON_PATH; }
+        else if (SHOW_ENDPOINT) { dohUrl = currentProtocol + '//' + currentHost + DOH_PATH; }
+        else { alert('未配置 JSON 端点（部署时设置 JSON_PATH 即可启用）'); return; }
+      }
+      else if (dohSelect === 'custom') {
+        dohUrl = document.getElementById('customDoh').value;
+        if (!dohUrl) { alert('请输入自定义 DoH 地址'); return; }
+      } else { dohUrl = dohSelect; }
         var domain = document.getElementById('domain').value;
         if (!domain) { alert('请输入需要解析的域名'); return; }
         var jsonUrl = new URL(dohUrl);
