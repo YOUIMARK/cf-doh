@@ -1,0 +1,13 @@
+{
+  "name": "doh-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": [],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "UPSTREAM_URLS": "https://cloudflare-dns.com/dns-query,https://dns.google/dns-query",
+    "DOH_PATH": "/dns-query"
+  }
+}

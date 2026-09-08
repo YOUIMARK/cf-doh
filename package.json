@@ -1,0 +1,23 @@
+{
+  "name": "doh-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fused DNS-over-HTTPS proxy for Cloudflare Workers/Pages: zero runtime deps, dual-layer TTL-aware caching, ECS, failover, auth.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.5",
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "@msw/cloudflare": "^0.0.1",
+    "msw": "^2.15.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.129.1"
+  }
+}
