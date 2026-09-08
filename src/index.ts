@@ -37,6 +37,7 @@ import { buildCacheControl } from "./cache-control";
 import { acceptsMediaType, parseMediaType } from "./media";
 import { checkAdmin, checkAuth } from "./auth";
 import { corsHeaders, dnsResponse, jsonError, ok204 } from "./response";
+import { renderHomepage } from "./frontend.js";
 
 export interface Env {
   [key: string]: string | undefined;
@@ -509,7 +510,8 @@ function handleRoot(cfg: Config): Response {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   }
-  return jsonError(404, "not found");
+  // Default: the resolver frontend (UI borrowed from CF-Workers-DoH).
+  return renderHomepage(cfg);
 }
 
 /** Lightweight endpoint info page (path hidden unless SHOW_DOH_ENDPOINT=true). */
