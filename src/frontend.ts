@@ -208,7 +208,6 @@ export function renderHomepage(cfg: Config): Response {
     "use strict";
     var SHOW_ENDPOINT = ${JSON.stringify(showEndpoint)};
     var DOH_PATH = ${JSON.stringify(showEndpoint ? dohPath : "")};
-    var JSON_PATH = ${JSON.stringify(cfg.jsonPath ?? "")};
     var currentUrl = window.location.href;
     var currentHost = window.location.host;
     var currentProtocol = window.location.protocol;
@@ -295,8 +294,10 @@ export function renderHomepage(cfg: Config): Response {
           top.className = 'd-flex justify-content-between align-items-center';
           var ipSpan = document.createElement('span');
           ipSpan.className = 'ip-address';
-          ipSpan.setAttribute('data-copy', record.data || record.name || '');
-          ipSpan.textContent = record.data || record.name || '-';
+          var val = (record.data !== undefined && record.data !== null && record.data !== '')
+            ? record.data : (record.name || '-');
+          ipSpan.setAttribute('data-copy', val);
+          ipSpan.textContent = val;
           ipSpan.addEventListener('click', function () { handleCopyClick(this, this.getAttribute('data-copy')); });
           top.appendChild(ipSpan);
 
@@ -419,20 +420,16 @@ export function renderHomepage(cfg: Config): Response {
       document.getElementById('getJsonBtn').addEventListener('click', function () {
         var dohSelect = document.getElementById('dohSelect').value;
         var dohUrl;
-        if (dohSelect === 'current') {
-        if (JSON_PATH) { dohUrl = currentProtocol + '//' + currentHost + JSON_PATH; }
-        else if (SHOW_ENDPOINT) { dohUrl = currentProtocol + '//' + currentHost + DOH_PATH; }
-        else { alert('未配置 JSON 端点（部署时设置 JSON_PATH 即可启用）'); return; }
-      }
+        if (dohSelect === 'current') { dohUrl = currentDohUrl; }
       else if (dohSelect === 'custom') {
         dohUrl = document.getElementById('customDoh').value;
         if (!dohUrl) { alert('请输入自定义 DoH 地址'); return; }
       } else { dohUrl = dohSelect; }
         var domain = document.getElementById('domain').value;
         if (!domain) { alert('请输入需要解析的域名'); return; }
-        var jsonUrl = new URL(dohUrl);
-        jsonUrl.searchParams.set('name', domain);
-        window.open(jsonUrl.toString(), '_blank');
+        // Open our own aggregate endpoint (server-side forwarding) so Get Json
+        // works for every provider — same origin, no third-party CORS wall.
+        window.open('?doh=' + encodeURIComponent(dohUrl) + '&domain=' + encodeURIComponent(domain) + '&type=all', '_blank');
       });
     });
   </script>
