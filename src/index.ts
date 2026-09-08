@@ -563,6 +563,15 @@ async function queryDnsJson(
   throw lastError ?? new Error("无法完成 DNS 查询");
 }
 
+/** Normalize dns-json Question/Answer fields: some providers (e.g. alidns)
+ *  return a single object instead of an array — cmliu's original handles both
+ *  (Array.isArray branch); spread-on-object would throw "is not iterable". */
+function qList(v: unknown): unknown[] {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === "object") return [v];
+  return [];
+}
+
 async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
   const domain = url.searchParams.get("domain") || url.searchParams.get("name") || "www.google.com";
   const dohParam = url.searchParams.get("doh") || "";
@@ -592,22 +601,19 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
         queryDnsJson(base, domain, "NS").catch(() => ({ Answer: [], Authority: [], Question: [] })),
       ]);
       const nsRecords: unknown[] = [];
-      for (const r of (ns.Answer ?? []) as Array<{ type: number }>) if (r.type === 2) nsRecords.push(r);
-      for (const r of (ns.Authority ?? []) as Array<{ type: number }>) if (r.type === 2 || r.type === 6) nsRecords.push(r);
+      for (const r of qList(ns.Answer)) if ((r as { type?: number }).type === 2) nsRecords.push(r);
+      for (const r of qList(ns.Authority)) {
+        const t = (r as { type?: number }).type;
+        if (t === 2 || t === 6) nsRecords.push(r);
+      }
+      const aRec = qList(a.Answer);
+      const aaaaRec = qList(aaaa.Answer);
       const combined = {
         Status: (a as { Status?: number }).Status || (aaaa as { Status?: number }).Status || (ns as { Status?: number }).Status || 0,
-        Question: [
-          ...((a as { Question?: unknown[] }).Question ?? []),
-          ...((aaaa as { Question?: unknown[] }).Question ?? []),
-          ...((ns as { Question?: unknown[] }).Question ?? []),
-        ],
-        Answer: [
-          ...((a as { Answer?: unknown[] }).Answer ?? []),
-          ...((aaaa as { Answer?: unknown[] }).Answer ?? []),
-          ...((ns as { Answer?: unknown[] }).Answer ?? []),
-        ],
-        ipv4: { records: (a as { Answer?: unknown[] }).Answer ?? [] },
-        ipv6: { records: (aaaa as { Answer?: unknown[] }).Answer ?? [] },
+        Question: [...qList(a.Question), ...qList(aaaa.Question), ...qList(ns.Question)],
+        Answer: [...aRec, ...aaaaRec, ...qList(ns.Answer)],
+        ipv4: { records: aRec },
+        ipv6: { records: aaaaRec },
         ns: { records: nsRecords },
       };
       return new Response(JSON.stringify(combined, null, 2), {
