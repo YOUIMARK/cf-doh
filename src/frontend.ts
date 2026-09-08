@@ -128,7 +128,7 @@ export function renderHomepage(cfg: Config): Response {
               <option value="https://cloudflare-dns.com/dns-query">https://cloudflare-dns.com/dns-query (Cloudflare)</option>
               <option value="https://dns.adguard-dns.com/resolve">https://dns.adguard-dns.com/resolve (AdGuard)</option>
               <option value="https://dns.nextdns.io">https://dns.nextdns.io (NextDNS)</option>
-              <option value="https://freedns.controld.com/p0">https://freedns.controld.com/p0 (Control D)</option>
+              <option value="https://dns.opendns.com/dns-query">https://dns.opendns.com/dns-query (OpenDNS)</option>
               <option value="custom">自定义...</option>
             </select>
           </div>
