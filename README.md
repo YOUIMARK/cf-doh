@@ -55,6 +55,12 @@ https://<你的域名>/dns-query?dns=<b64>  # GET，dns 参数为 base64url 编�
 
 **JSON API 同样支持 flag 后缀**（如 `JSON_PATH=/resolve` 时：`/resolve/v4/ecs` 等）；**DoH 基路径也直接支持 JSON 查询**（`/dns-query?name=...` 即 dns.google/resolve 风格，无需特定 Accept 头），**基路径上的 flag 同样生效**（如 `/dns-query/v6?name=...` 强制 AAAA）。
 
+JSON API（Google DoH JSON 兼容）行为：
+- 输入校验（非法 400）：`name` ≤253 字符且只含 `字母/数字/./-/_`；`type` 白名单（A/AAAA/ANY/NS/MX/TXT/CNAME/SOA/PTR/SRV/CAA/HTTPS/SVCB/DS/DNSKEY/TLSA/ALL）；`edns_client_subnet` 必须是合法 CIDR；`cd`/`do` 必须是 `0|1|true|false`
+- 上游应答必须能解析为 dns-json schema（`Status` 为数字、`Question`/`Answer`/`Authority`/`Additional` 为对象数组），否则 502、不缓存
+- 缓存 TTL：正应答按最小 Answer TTL；NXDOMAIN/NODATA 按 RFC 2308 负缓存 `min(SOA TTL, SOA.MINIMUM)`（从 SOA 的 `data` 第 7 字段取 MINIMUM）；无可用 TTL 信息不缓存（no-store）
+- flag 后缀 `ecs` = 代理用客户端 IP 掩码注入 `edns_client_subnet`；`no-ecs` = 剥离任何子网参数；ECS 敏感响应不共享缓存
+
 行为细节：
 - `DOH_PATH` 必须是**单个路径段**（`/xxx` 格式，字母/数字/`-`/`_`），非法值会在启动时报错
 - 设置自定义 `DOH_PATH` 后，标准 `/dns-query` 不再注册，返回 404（路径混淆）

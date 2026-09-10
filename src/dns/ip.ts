@@ -4,9 +4,28 @@
  * needed before injecting a client subnet upstream.
  */
 
+import { parseIp } from "./encode";
+
 export interface IpAddress {
   family: 1 | 2;
   bytes: Uint8Array;
+}
+
+/** Parses a "ip/prefix" CIDR string (e.g. "1.2.3.0/24", "2001:db8::/56").
+ *  Returns null on invalid input or an out-of-range prefix length. */
+export function parseCidr(s: string): { ip: IpAddress; prefix: number } | null {
+  const trimmed = s.trim();
+  const slash = trimmed.lastIndexOf("/");
+  if (slash === -1) return null;
+  const ipPart = trimmed.slice(0, slash);
+  const prefixPart = trimmed.slice(slash + 1);
+  if (!/^\d{1,3}$/.test(prefixPart)) return null;
+  const prefix = Number.parseInt(prefixPart, 10);
+  const ip = parseIp(ipPart);
+  if (!ip) return null;
+  const bits = ip.family === 1 ? 32 : 128;
+  if (prefix > bits) return null;
+  return { ip, prefix };
 }
 
 function isPrivateV4(a: Uint8Array): boolean {

@@ -30,7 +30,7 @@ import {
   parseClientIp,
   removeEcsOption,
 } from "./dns/ecs";
-import { formatEcsPrefix } from "./dns/ip";
+import { formatEcsPrefix, parseCidr } from "./dns/ip";
 import { validateQuery } from "./dns/validate";
 import { padResponse } from "./dns/padding";
 import { buildCacheControl } from "./cache-control";
@@ -381,6 +381,18 @@ function parseOverrideIp(ip: string): ReturnType<typeof parseClientIp> {
 
 // ── dns-json API ───────────────────────────────────────────────────────────
 
+/** RFC 1035 §2.3.4: a domain name is at most 253 characters of text. */
+const MAX_DOMAIN_TEXT = 253;
+/** Text form of a domain name (letters, digits, dots, hyphen, underscore). */
+const DOMAIN_CHARS = /^[a-zA-Z0-9._-]+$/;
+/** Canonical boolean forms accepted for the cd/do dns-json flags. */
+const BOOLEAN_FLAG = /^(0|1|true|false)$/i;
+/** dns-json type whitelist (abuse/amplification guard, mirrors vercel-doh). */
+const JSON_ALLOWED_TYPES = new Set([
+  "ALL", "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV",
+  "CAA", "HTTPS", "SVCB", "DS", "DNSKEY", "TLSA", "ANY",
+]);
+
 /** Google dns-json type names → wire type codes (JSON cache key dimension).
  *  Modern RR types (SVCB/HTTPS, DNSSEC) included so their cache keys never
  *  collapse onto unknown-type code 0 (CF-013). */
@@ -394,6 +406,79 @@ function jsonTypeCode(type: string): number {
   const t = type.trim().toUpperCase();
   if (/^\d+$/.test(t)) return Math.min(65535, Number(t));
   return JSON_TYPE_CODES[t] ?? 0;
+}
+
+/** Minimal dns-json schema (Google resolve style) after validation. */
+interface JsonResponse {
+  Status?: unknown;
+  Question?: unknown;
+  Answer?: unknown;
+  Authority?: unknown;
+  Additional?: unknown;
+}
+
+/**
+ * Parses and structurally validates a dns-json body (Google resolve style):
+ * a JSON object with a numeric `Status` when present and array-typed
+ * Question/Answer/Authority/Additional sections with object entries. Returns
+ * null when the body is not trustworthy as a dns-json response (mirrors
+ * vercel-doh's `validateJsonResponse`).
+ */
+function validateJsonResponse(body: Uint8Array): JsonResponse | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  if ("Status" in obj && typeof obj.Status !== "number") return null;
+  for (const key of ["Question", "Answer", "Authority", "Additional"] as const) {
+    const value = obj[key];
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) return null;
+    if (value.some((entry) => entry === null || typeof entry !== "object" || Array.isArray(entry))) {
+      return null;
+    }
+  }
+  return obj as JsonResponse;
+}
+
+/** Minimum numeric TTL across a dns-json record array, or null. */
+function minJsonTtl(records: unknown): number | null {
+  if (!Array.isArray(records)) return null;
+  let min: number | null = null;
+  for (const record of records) {
+    const ttl = (record as Record<string, unknown> | null)?.TTL;
+    if (typeof ttl === "number" && Number.isFinite(ttl)) {
+      min = min === null ? ttl : Math.min(min, ttl);
+    }
+  }
+  return min;
+}
+
+/**
+ * RFC 2308 negative TTL from a dns-json SOA record: min(SOA TTL, SOA.MINIMUM).
+ * The SOA `data` string is "MNAME RNAME SERIAL REFRESH RETRY EXPIRE MINIMUM"
+ * (7 whitespace-separated fields). Returns null when no parseable SOA exists.
+ */
+function soaJsonNegativeTtl(authority: unknown): number | null {
+  if (!Array.isArray(authority)) return null;
+  for (const record of authority) {
+    const rec = record as Record<string, unknown> | null;
+    if (!rec || rec.type !== 6) continue; // SOA
+    const ttl = rec.TTL;
+    const data = rec.data;
+    if (typeof ttl !== "number" || !Number.isFinite(ttl)) continue;
+    if (typeof data !== "string") continue;
+    const fields = data.trim().split(/\s+/);
+    if (fields.length < 7) continue;
+    const minimum = Number(fields[6]);
+    if (!Number.isFinite(minimum) || minimum < 0) continue;
+    return Math.min(ttl, minimum);
+  }
+  return null;
 }
 
 /**
@@ -448,6 +533,28 @@ async function handleJson(
 
   const name = url.searchParams.get("name");
   if (!name) return jsonError(400, "missing name parameter");
+
+  // ── Input validation before anything is forwarded upstream (abuse /
+  //    amplification guard): bounded name, whitelisted type, canonical
+  //    boolean flags, valid CIDR for edns_client_subnet.
+  const rawType = url.searchParams.get("type");
+  const rawCidr = url.searchParams.get("edns_client_subnet");
+  const rawCd = url.searchParams.get("cd");
+  const rawDo = url.searchParams.get("do");
+  if (name.length > MAX_DOMAIN_TEXT || !DOMAIN_CHARS.test(name)) {
+    return jsonError(400, "invalid name parameter");
+  }
+  if (rawType !== null && rawType !== "" && !JSON_ALLOWED_TYPES.has(rawType.toUpperCase())) {
+    return jsonError(400, `unsupported type: ${rawType}`);
+  }
+  if (rawCidr !== null && rawCidr !== "" && parseCidr(rawCidr) === null) {
+    return jsonError(400, "invalid edns_client_subnet (expected ip/prefix)");
+  }
+  for (const flag of [rawCd, rawDo]) {
+    if (flag !== null && flag !== "" && !BOOLEAN_FLAG.test(flag)) {
+      return jsonError(400, "invalid cd/do flag (expected 0|1|true|false)");
+    }
+  }
 
   // Effective upstream params: start from the client's query, then apply the
   // ECS and answer-family flags on top (URL overrides env, per request).
@@ -519,19 +626,27 @@ async function handleJson(
     const body = new Uint8Array(await resp.arrayBuffer());
     if (body.byteLength > cfg.maxBody) return jsonError(502, "upstream response too large");
 
-    // TTL=0 (or missing/absent answers) means there is NO provable freshness:
-    // cache nothing instead of falling back to a default positive TTL (CF-012).
+    // Upstream responses must parse as a valid dns-json schema; anything
+    // else is treated as an upstream failure (502), never cached.
+    const parsed = validateJsonResponse(body);
+    if (!parsed) return jsonError(502, "upstream returned invalid dns-json");
+
+    // TTL policy (mirrors vercel-doh's jsonCacheControl):
+    //  - Status 0 with answers   → min Answer TTL
+    //  - NXDOMAIN / NODATA       → RFC 2308 negative TTL: min(SOA TTL,
+    //    SOA.MINIMUM) derived from the SOA record's data string; falling
+    //    back to the min Authority TTL when the SOA cannot be parsed
+    //  - anything else, or no usable TTL → do not cache (CF-012)
+    // ECS-sensitive responses are never shared-cached.
     let ttl = 0;
-    try {
-      const j = JSON.parse(new TextDecoder().decode(body)) as {
-        Answer?: Array<{ TTL?: number }>;
-      };
-      if (Array.isArray(j.Answer) && j.Answer.length > 0) {
-        const ttls = j.Answer.map((a) => Number(a.TTL)).filter((n) => Number.isFinite(n) && n > 0);
-        if (ttls.length > 0) ttl = Math.min(...ttls);
+    if (!ecsSensitive) {
+      const status = typeof parsed.Status === "number" ? parsed.Status : -1;
+      if (status === 0 || status === 3) {
+        const answerTtl = minJsonTtl(parsed.Answer);
+        const negativeTtl = soaJsonNegativeTtl(parsed.Authority) ?? minJsonTtl(parsed.Authority);
+        if (status === 0 && answerTtl !== null) ttl = answerTtl;
+        else if (negativeTtl !== null) ttl = negativeTtl;
       }
-    } catch {
-      ttl = 0; // non-JSON upstream response → do not cache
     }
     ttl = Math.min(cfg.ttlCeil, ttl);
 
