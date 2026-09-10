@@ -692,7 +692,11 @@ function jsonResponse(
   return new Response(body, {
     status: 200,
     headers: {
-      "content-type": DNS_JSON,
+      // application/json (dns.google/resolve parity): unregistered MIME types
+      // like application/dns-json make browsers DOWNLOAD the response instead
+      // of rendering it, so the "Get Json" button opened a file named after
+      // the URL path instead of showing the JSON page.
+      "content-type": "application/json; charset=utf-8",
       "cache-control": ttl > 0 ? `public, s-maxage=${ttl}` : "no-store",
       ...corsHeaders(),
       ...debugHeaders,

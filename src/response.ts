@@ -57,7 +57,10 @@ export function jsonResponse(
   return new Response(body, {
     status: 200,
     headers: {
-      "content-type": "application/dns-json",
+      // application/json (dns.google/resolve parity) — see src/index.ts
+      // jsonResponse for why the unregistered application/dns-json type
+      // made browsers download instead of render.
+      "content-type": "application/json; charset=utf-8",
       "cache-control": `max-age=${Math.max(0, Math.floor(ttl))}`,
       "x-proxied-by": "cf-doh",
       ...corsHeaders(),
