@@ -20,7 +20,7 @@ import {
 import { DohCache, makeCacheKeyStr, makeWireCacheKey } from "./cache";
 import { resolveCandidates, resolveProvider, type ResolveResult } from "./upstream";
 import { parseQuestion } from "./dns/parse";
-import { base64urlToBytes, getEcs, toHex, truncateIp } from "./dns/encode";
+import { base64urlToBytes, getEcs, parseIp, toHex, truncateIp } from "./dns/encode";
 import { buildSyntheticNxdomain, classifyResponse, scanAnswers, soaNegativeTtl } from "./dns/classify";
 import { buildErrorResponse, extendedRcode, questionType, setQuestionType, withTransactionId } from "./dns/wire";
 import {
@@ -30,6 +30,7 @@ import {
   parseClientIp,
   removeEcsOption,
 } from "./dns/ecs";
+import { formatEcsPrefix } from "./dns/ip";
 import { validateQuery } from "./dns/validate";
 import { padResponse } from "./dns/padding";
 import { buildCacheControl } from "./cache-control";
@@ -89,8 +90,15 @@ function parsePathFlags(pathname: string, basePath: string): PathFlags {
     else if (segment === "v6") flags.family = "v6";
     else if (ECS_FLAGS[segment]) flags.behavior = ECS_FLAGS[segment]!;
     else if (segment.startsWith("ecs-")) {
-      flags.ecsOverrideIp = segment.slice(4);
-      flags.behavior = "force_enable";
+      // ecs-<ip> forces ECS on with a fixed source IP. An invalid IP literal
+      // is an unknown path (404), mirroring vercel-doh.
+      const ip = segment.slice(4);
+      if (!parseIp(ip)) {
+        flags.provider = INVALID_PATH;
+      } else {
+        flags.ecsOverrideIp = ip;
+        flags.behavior = "force_enable";
+      }
     } else if (flags.provider === null) flags.provider = segment;
     else flags.provider = INVALID_PATH;
   }
@@ -173,7 +181,13 @@ async function handleDoh(
   // Browser-style GET with no dns param → JSON query or endpoint info.
   if (method === "GET" && !url.searchParams.get("dns")) {
     if (url.searchParams.get("name") || wantsJson) {
-      return handleJson(request, cfg, cache, ctx, url);
+      // Base-path JSON query (dns.google/resolve style): URL flags on the
+      // DoH base path apply too, e.g. /{DOH_PATH}/v6?name=... forces AAAA.
+      return handleJson(request, cfg, cache, ctx, url, {
+        family: flags.family,
+        behavior: flags.behavior,
+        ecsOverrideIp: flags.ecsOverrideIp,
+      });
     }
     if (acceptsMessage) return jsonError(400, "missing dns parameter");
     return infoText(cfg);
@@ -382,44 +396,109 @@ function jsonTypeCode(type: string): number {
   return JSON_TYPE_CODES[t] ?? 0;
 }
 
+/**
+ * JSON API URL flags, parsed from path suffixes after the JSON base path:
+ *   {jsonPath}/v4           → force type=A (answer family)
+ *   {jsonPath}/v6           → force type=AAAA
+ *   {jsonPath}/ecs          → inject edns_client_subnet (alias /auto_ecs)
+ *   {jsonPath}/ecs-<ip>     → inject with a fixed source IP
+ *   {jsonPath}/no-ecs       → strip any edns_client_subnet (alias /no_ecs)
+ * Unknown segments (incl. provider-style) are an unknown path (404) — the
+ * JSON API has its own upstream (JSON_UPSTREAM), no provider mapping.
+ */
+function parseJsonFlags(pathname: string, jsonPath: string): PathFlags {
+  const base = jsonPath.replace(/\/+$/, "");
+  if (pathname === base) return { ...EMPTY_FLAGS };
+  if (!pathname.startsWith(`${base}/`)) return { ...EMPTY_FLAGS };
+  const segments = pathname.slice(base.length + 1).split("/").filter((s) => s.length > 0);
+  const flags: PathFlags = { ...EMPTY_FLAGS };
+  for (const segment of segments) {
+    if (segment === "v4") flags.family = "v4";
+    else if (segment === "v6") flags.family = "v6";
+    else if (ECS_FLAGS[segment]) flags.behavior = ECS_FLAGS[segment]!;
+    else if (segment.startsWith("ecs-")) {
+      const ip = segment.slice(4);
+      if (!parseIp(ip)) return { ...EMPTY_FLAGS, provider: INVALID_PATH };
+      flags.ecsOverrideIp = ip;
+      flags.behavior = "force_enable";
+    } else return { ...EMPTY_FLAGS, provider: INVALID_PATH };
+  }
+  return flags;
+}
+
 async function handleJson(
   request: Request,
   cfg: Config,
   cache: DohCache,
   ctx: ExecutionContext,
   url: URL,
+  baseFlags?: Pick<PathFlags, "family" | "behavior" | "ecsOverrideIp">,
 ): Promise<Response> {
   if (request.method === "OPTIONS") return ok204();
   if (!checkAuth(request, cfg)) return jsonError(401, "unauthorized");
   if (request.method !== "GET") return jsonError(405, "method not allowed");
 
+  // URL flags: JSON-path suffix (e.g. /resolve/v4/ecs) wins over base-path
+  // flags (e.g. /dns-query/v6?name=...), which win over env defaults.
+  const suffixFlags = cfg.jsonPath ? parseJsonFlags(url.pathname, cfg.jsonPath) : { ...EMPTY_FLAGS };
+  if (suffixFlags.provider === INVALID_PATH) return jsonError(404, "unknown path");
+  const family = suffixFlags.family ?? baseFlags?.family ?? cfg.upstreamFamily;
+  const behavior = suffixFlags.behavior ?? baseFlags?.behavior ?? null;
+  const ecsOverrideIp = suffixFlags.ecsOverrideIp ?? baseFlags?.ecsOverrideIp ?? cfg.ecsOverrideIp;
+
   const name = url.searchParams.get("name");
   if (!name) return jsonError(400, "missing name parameter");
-  const qtype = url.searchParams.get("type") ?? "A";
 
-  // The raw type string is hashed in so two different unknown type names can
-  // never share a cache entry through the sentinel code 0 (CF-013).
-  const cacheKey = await makeCacheKeyStr({
-    name: name.toLowerCase(),
-    qtype: jsonTypeCode(qtype),
-    qclass: 0,
-    modeKey: "j",
-    ecsBucket: "none",
-    typeTag: qtype.trim().toLowerCase(),
-  });
-  const local = cache.getLocal(cacheKey);
-  if (local) {
-    return jsonResponse(local.body, local.ttl, debugHeaders(cfg, "hit", "none", -1, local.ttl));
+  // Effective upstream params: start from the client's query, then apply the
+  // ECS and answer-family flags on top (URL overrides env, per request).
+  const params = new URLSearchParams(url.search);
+
+  // ── ECS flag: /ecs /ecs-<ip> inject edns_client_subnet; /no-ecs strips. ──
+  if (behavior === "force_disable") {
+    params.delete("edns_client_subnet");
+  } else if (behavior === "force_enable") {
+    const sourceIp = ecsOverrideIp ? parseIp(ecsOverrideIp) : parseClientIp(request.headers);
+    if (sourceIp) {
+      params.set("edns_client_subnet", formatEcsPrefix(sourceIp, sourceIp.family === 1 ? cfg.ecsV4 : cfg.ecsV6));
+    }
   }
-  const remote = await cache.getRemote(cacheKey);
-  if (remote) {
-    cache.putLocal(cacheKey, remote);
-    return jsonResponse(remote.body, remote.ttl, debugHeaders(cfg, "hit", "none", -1, remote.ttl));
+  const ecsSensitive = params.has("edns_client_subnet");
+
+  // ── Answer-family flag: force type=A (v4) / type=AAAA (v6) ──
+  if (family !== "auto") {
+    const current = (params.get("type") ?? "").toUpperCase();
+    const target = family === "v4" ? "A" : "AAAA";
+    if (current === "" || current === "A" || current === "AAAA" || current === "ANY") {
+      params.set("type", target);
+    }
+  }
+  const qtype = params.get("type") ?? "A";
+
+  // ECS-sensitive JSON responses are client-specific — never shared-cached.
+  let cacheKey: string | null = null;
+  if (!ecsSensitive) {
+    cacheKey = await makeCacheKeyStr({
+      name: name.toLowerCase(),
+      qtype: jsonTypeCode(qtype),
+      qclass: 0,
+      modeKey: "j",
+      ecsBucket: "none",
+      typeTag: qtype.trim().toLowerCase(),
+    });
+    const local = cache.getLocal(cacheKey);
+    if (local) {
+      return jsonResponse(local.body, local.ttl, debugHeaders(cfg, "hit", "none", -1, local.ttl));
+    }
+    const remote = await cache.getRemote(cacheKey);
+    if (remote) {
+      cache.putLocal(cacheKey, remote);
+      return jsonResponse(remote.body, remote.ttl, debugHeaders(cfg, "hit", "none", -1, remote.ttl));
+    }
   }
 
   const upstream = cfg.jsonUpstream ?? "https://dns.google/resolve";
   const upstreamUrl = new URL(upstream);
-  upstreamUrl.search = url.search;
+  upstreamUrl.search = params.toString();
   upstreamUrl.searchParams.delete("token"); // never leak our auth token upstream
 
   // The timeout covers fetch AND body read (CF-005) — headers arriving is not
@@ -456,12 +535,13 @@ async function handleJson(
     }
     ttl = Math.min(cfg.ttlCeil, ttl);
 
-    if (ttl > 0) {
+    if (ttl > 0 && cacheKey !== null) {
       const entry = { body, status: 200, ttl };
       cache.putLocal(cacheKey, entry);
       ctx.waitUntil(cache.putRemote(cacheKey, entry));
     }
-    return jsonResponse(body, ttl, debugHeaders(cfg, "miss", "none", -1, ttl));
+    // ECS-sensitive responses are never shared-cached: report ttl=0 → no-store.
+    return jsonResponse(body, ecsSensitive ? 0 : ttl, debugHeaders(cfg, "miss", "none", -1, ttl));
   } catch {
     return jsonError(502, "upstream unavailable");
   } finally {
@@ -761,7 +841,7 @@ function infoText(cfg: Config): Response {
 ${endpointLine}
 <ul>
 <li>URL flags（可与路径组合）：<code>/v4</code> 仅 A 记录 · <code>/v6</code> 仅 AAAA · <code>/ecs</code> 强制 ECS · <code>/no-ecs</code> 强制禁用（剥离已有 ECS）· <code>/ecs-&lt;ip&gt;</code> 指定 ECS 源 IP · <code>/{provider}</code> 按 <code>DOMAIN_MAPPINGS</code> 路由</li>
-<li><code>${cfg.jsonPath ?? "/dns-query-json"}</code> — dns-json API（浏览器查询工具）</li>
+<li><code>${cfg.jsonPath ?? "/dns-query-json"}</code> — dns-json API（浏览器查询工具；同样支持 flag 后缀，如 <code>${cfg.jsonPath ?? "/dns-query-json"}/v4/ecs</code>；DoH 基路径也支持 <code>?name=…</code> JSON 查询，基路径 flag 同样生效）</li>
 <li><code>/health</code> — 健康检查 · <code>/config</code> — 运行时配置（需 ADMIN_TOKEN）</li>
 </ul>
 <p>上游：已配置（隐私考虑，不在公开页面展示具体地址）</p>

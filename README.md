@@ -34,12 +34,40 @@ https://<你的域名>/dns-query?dns=<b64>  # GET，dns 参数为 base64url 编�
 
 浏览器/系统安全 DNS 中填入上面的 URL 即可。
 
+### URL flags（按请求覆盖环境变量，URL 优先）
+
+在 DoH 端点路径后追加一个或多个 flag，顺序任意、可组合：
+
+```
+/v4        只返回 A 记录（代理把查询类型重写为 A；覆盖 UPSTREAM_FAMILY）
+/v6        只返回 AAAA 记录（重写为 AAAA）
+/ecs       强制附加 ECS（= /auto_ecs）
+/ecs-<IP>  强制附加 ECS 并用指定 IP 作为子网（如 /ecs-8.8.8.8，可测地域解析）
+/no-ecs    强制禁用 ECS（= /no_ecs，剥离已有 ECS）
+/{provider}  按 DOMAIN_MAPPINGS 路由到指定上游
+
+例：https://<你的域名>/dns-query/v4/ecs-8.8.8.8
+    https://<你的域名>/dns-query/v6/google   （v6 + provider）
+```
+
+> ⚠️ 用**路径后缀**而非 query 参数：DoH GET 客户端会自己拼接 `?dns=...`，query 里的 flag 会被拼坏。路径后缀与 RFC 8484 完全兼容。
+> ⚠️ `v4`/`v6` = **答案族**（返回 A/AAAA），不是连接地址族。
+
+**JSON API 同样支持 flag 后缀**（如 `JSON_PATH=/resolve` 时：`/resolve/v4/ecs` 等）；**DoH 基路径也直接支持 JSON 查询**（`/dns-query?name=...` 即 dns.google/resolve 风格，无需特定 Accept 头），**基路径上的 flag 同样生效**（如 `/dns-query/v6?name=...` 强制 AAAA）。
+
+行为细节：
+- `DOH_PATH` 必须是**单个路径段**（`/xxx` 格式，字母/数字/`-`/`_`），非法值会在启动时报错
+- 设置自定义 `DOH_PATH` 后，标准 `/dns-query` 不再注册，返回 404（路径混淆）
+- 前端默认隐藏端点路径（路径混淆不泄露）：需设置 `SHOW_DOH_ENDPOINT=true` 后，端点信息页才会展示 DoH 端点 URL；`/dns-query-json`（或自定义 `JSON_PATH`）、`/health`、`/` 保持固定路径
+- 未设置时行为不变（默认 `/dns-query`）
+
 ## 配置（环境变量，全部可选）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `UPSTREAM_URLS` | `https://cloudflare-dns.com/dns-query,https://dns.google/dns-query` | 逗号分隔的上游 DoH 列表 |
-| `DOH_PATH` | `/dns-query` | DoH 端点路径。**强烈建议改为带随机串的路径**（如 `/dns-query-kx92jf`），路径本身就是第一道防线 |
+| `DOH_PATH` | `/dns-query` | DoH 端点路径。**强烈建议改为带随机串的路径**（如 `/dns-query-kx92jf`），路径本身就是第一道防线。必须是单个路径段（`/xxx`，字母/数字/`-`/`_`），非法值启动时报错 |
+| `SHOW_DOH_ENDPOINT` | `false` | `true` 时端点信息页（浏览器直接访问 DoH 基路径）展示 DoH 端点 URL；默认隐藏（路径混淆不泄露） |
 | `JSON_PATH` | 空（关） | 启用 Google 风格 JSON API（如 `/resolve`） |
 | `JSON_UPSTREAM` | `https://dns.google/resolve` | JSON API 上游 |
 | `AUTH_TOKEN` | 空（关） | 设置后需 `Authorization: Bearer <token>`、`?token=` 或 `X-DOH-Token`。**推荐使用 `Authorization: Bearer`**；`?token=` 会进入访问日志/浏览器历史/Referer，仅保留作兼容 |

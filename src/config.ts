@@ -130,6 +130,21 @@ function normPath(v: string | undefined, def: string): string {
   return p;
 }
 
+/**
+ * Parses the DoH base path. Must be a SINGLE URL path segment ("/xxx"
+ * format, letters/digits/-/_), e.g. "/dns-query" or "/3f9a2b7c". Used for
+ * path obfuscation: when set to a non-default value, the standard
+ * /dns-query endpoints are NOT registered. Invalid values fail fast at
+ * startup instead of silently degrading (mirrors vercel-doh).
+ */
+function parseDohPath(v: string | undefined): string {
+  const p = normPath(v, "/dns-query");
+  if (!/^\/[A-Za-z0-9_-]+$/.test(p)) {
+    throw new Error(`invalid DOH_PATH: "${p}" (expected a single path segment, e.g. /dns-query)`);
+  }
+  return p;
+}
+
 function parseUpstreams(v: string | undefined, def: string[]): string[] {
   const raw = v === undefined || v.trim() === "" ? def : v.split(",");
   const out: string[] = [];
@@ -222,7 +237,7 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
   return {
     upstreamUrls: parseUpstreams(env["UPSTREAM_URLS"], DEFAULT_UPSTREAMS),
     ecsUpstreamUrls: parseUpstreams(env["ECS_UPSTREAM_URLS"], ["https://dns.google/dns-query"]),
-    dohPath: normPath(env["DOH_PATH"], "/dns-query"),
+    dohPath: parseDohPath(env["DOH_PATH"]),
     jsonPath: env["JSON_PATH"] && env["JSON_PATH"].trim() !== "" ? normPath(env["JSON_PATH"], "/dns-query.json") : null,
     jsonUpstream: env["JSON_UPSTREAM"] && env["JSON_UPSTREAM"].trim() !== "" ? pick(env["JSON_UPSTREAM"], "https://dns.google/resolve") : null,
     authToken: env["AUTH_TOKEN"] && env["AUTH_TOKEN"].trim() !== "" ? env["AUTH_TOKEN"] : null,

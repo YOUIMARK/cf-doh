@@ -48,3 +48,29 @@ export function isPrivateOrReserved(ip: IpAddress): boolean {
   if (ip.family === 1) return isPrivateV4(ip.bytes);
   return isPrivateV6(ip.bytes);
 }
+
+/**
+ * Masks an IP to `prefixLen` bits and formats it as "a.b.c.d/prefix"
+ * (IPv4) or "xxxx:xxxx:.../prefix" (IPv6, uncompressed) — the form used by
+ * the `edns_client_subnet` query parameter of dns-json APIs (mirrors
+ * vercel-doh's `formatEcsPrefix`).
+ */
+export function formatEcsPrefix(ip: IpAddress, prefixLen: number): string {
+  const bits = ip.family === 1 ? 32 : 128;
+  const prefix = Math.max(0, Math.min(prefixLen, bits));
+  const bytes = Array.from(ip.bytes);
+  const fullBytes = Math.floor(prefix / 8);
+  const remBits = prefix % 8;
+  for (let i = fullBytes; i < bytes.length; i++) bytes[i] = 0;
+  if (remBits > 0 && fullBytes < bytes.length) {
+    bytes[fullBytes] = (bytes[fullBytes] as number) & (0xff << (8 - remBits));
+  }
+  if (ip.family === 1) {
+    return `${bytes.join(".")}/${prefix}`;
+  }
+  const groups: string[] = [];
+  for (let i = 0; i < 16; i += 2) {
+    groups.push(((bytes[i] as number) << 8 | (bytes[i + 1] as number)).toString(16).padStart(4, "0"));
+  }
+  return `${groups.join(":")}/${prefix}`;
+}
