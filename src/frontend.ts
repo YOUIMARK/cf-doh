@@ -285,6 +285,63 @@ export function renderHomepage(cfg: Config): Response {
         records.forEach(function (record) {
           var recordDiv = document.createElement('div');
           recordDiv.className = 'ip-record';
+
+          // SOA 记录（原版 cmliu 的 SOA 分支，textContent 安全渲染、视觉不变）：
+          // 拆分为 主 NS / 管理邮箱 / 序列号 / 刷新间隔 / 重试间隔 / 过期时间 / 最小 TTL。
+          if (record.type === 6) {
+            var soaParts = (record.data || '').split(' ');
+            var adminEmail = soaParts[1] ? soaParts[1].replace('.', '@') : '';
+            if (adminEmail.endsWith('.')) adminEmail = adminEmail.slice(0, -1);
+            var soaTop = document.createElement('div');
+            soaTop.className = 'd-flex justify-content-between align-items-center mb-2';
+            var soaName = document.createElement('span');
+            soaName.className = 'ip-address';
+            var soaNameVal = record.name || '-';
+            soaName.setAttribute('data-copy', soaNameVal);
+            soaName.textContent = soaNameVal;
+            soaName.addEventListener('click', function () { handleCopyClick(this, this.getAttribute('data-copy')); });
+            soaTop.appendChild(soaName);
+            var soaBadge = document.createElement('span'); soaBadge.className = 'badge bg-warning'; soaBadge.textContent = 'SOA';
+            soaTop.appendChild(soaBadge);
+            var soaTtl = document.createElement('span');
+            soaTtl.className = 'text-muted ttl-info';
+            soaTtl.textContent = 'TTL: ' + (record.TTL != null ? formatTTL(record.TTL) : '-');
+            soaTop.appendChild(soaTtl);
+            recordDiv.appendChild(soaTop);
+
+            var soaDetails = document.createElement('div');
+            soaDetails.className = 'ps-3 small';
+            var soaRows = [
+              ['主 NS', soaParts[0] || '', true],
+              ['管理邮箱', adminEmail, true],
+              ['序列号', soaParts[2] || '', false],
+              ['刷新间隔', formatTTL(soaParts[3]), false],
+              ['重试间隔', formatTTL(soaParts[4]), false],
+              ['过期时间', formatTTL(soaParts[5]), false],
+              ['最小 TTL', formatTTL(soaParts[6]), false],
+            ];
+            soaRows.forEach(function (row) {
+              var rowDiv = document.createElement('div');
+              var rowLabel = document.createElement('strong');
+              rowLabel.textContent = row[0] + ': ';
+              rowDiv.appendChild(rowLabel);
+              var rowValue = document.createElement('span');
+              if (row[2]) {
+                rowValue.className = 'ip-address';
+                rowValue.setAttribute('data-copy', String(row[1]));
+                rowValue.textContent = String(row[1]);
+                rowValue.addEventListener('click', function () { handleCopyClick(this, this.getAttribute('data-copy')); });
+              } else {
+                rowValue.textContent = String(row[1]);
+              }
+              rowDiv.appendChild(rowValue);
+              soaDetails.appendChild(rowDiv);
+            });
+            recordDiv.appendChild(soaDetails);
+            container.appendChild(recordDiv);
+            return;
+          }
+
           var top = document.createElement('div');
           top.className = 'd-flex justify-content-between align-items-center';
           var ipSpan = document.createElement('span');
@@ -331,9 +388,6 @@ export function renderHomepage(cfg: Config): Response {
           } else if (record.type === 2) {
             var nsBadge = document.createElement('span'); nsBadge.className = 'badge bg-info'; nsBadge.textContent = 'NS';
             top.appendChild(nsBadge);
-          } else if (record.type === 6) {
-            var soaBadge = document.createElement('span'); soaBadge.className = 'badge bg-warning'; soaBadge.textContent = 'SOA';
-            top.appendChild(soaBadge);
           } else {
             var otherBadge = document.createElement('span'); otherBadge.className = 'badge bg-secondary'; otherBadge.textContent = '类型: ' + record.type;
             top.appendChild(otherBadge);
