@@ -79,6 +79,19 @@ const ECS_FLAGS: Record<string, EcsBehavior> = {
   no_ecs: "force_disable",
 };
 
+/**
+ * Deterministic TTL jitter (borrowed from DoHflare's calculateDeterministicJitter):
+ * the jitter fraction is derived from the cache-key hex instead of Math.random,
+ * so the SAME entry gets the SAME jittered TTL on every isolate. A random
+ * jitter would disagree between isolates and fragment the shared Cache API
+ * entry (each isolate would store a slightly different max-age). Exported for
+ * unit tests.
+ */
+export function deterministicJitterTtl(seed: string, ttl: number, jitter: number): number {
+  const frac = (parseInt(seed.slice(-8), 16) / 0xffffffff) % 1;
+  return Math.max(1, Math.round(ttl * (1 - frac * jitter)));
+}
+
 function parsePathFlags(pathname: string, basePath: string): PathFlags {
   const base = basePath.replace(/\/+$/, "");
   if (pathname === base) return { ...EMPTY_FLAGS };
@@ -219,6 +232,13 @@ async function handleDoh(
     message = new Uint8Array(raw);
   } else {
     const dnsParam = url.searchParams.get("dns") ?? "";
+    // Reject by the base64url expansion ratio BEFORE decoding: an attacker
+    // can otherwise force an expensive 4/3-size decode of a huge parameter
+    // (each 4 chars of base64url encode 3 bytes; unpadded). Borrowed from
+    // NextDNS-DOH's parseDnsRequest pre-check.
+    if (dnsParam.length > Math.ceil((cfg.maxBody * 4) / 3) + 2) {
+      return jsonError(413, "query too large");
+    }
     const decoded = base64urlToBytes(dnsParam);
     if (!decoded) return jsonError(400, "invalid dns parameter (base64url)");
     message = decoded;
@@ -352,7 +372,7 @@ async function handleDoh(
     // past the record's real expiry. Effective TTL is capped at TTL_CEIL.
     internalTtl = Math.min(cfg.ttlCeil, authoritativeTtl);
     if (internalTtl > 0 && cfg.ttlJitter > 0) {
-      internalTtl = Math.max(1, Math.round(internalTtl * (1 - Math.random() * cfg.ttlJitter)));
+      internalTtl = deterministicJitterTtl(cacheKey ?? toHex(outBody.subarray(0, 8)), internalTtl, cfg.ttlJitter);
     }
   }
 

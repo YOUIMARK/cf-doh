@@ -8,6 +8,9 @@ export function corsHeaders(): Record<string, string> {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, x-doh-token",
+    // Cache the preflight response for a day so browser CORS clients skip
+    // the OPTIONS round-trip on every query (borrowed from DoHflare/DoH-vercel).
+    "access-control-max-age": "86400",
   };
 }
 
@@ -37,6 +40,9 @@ export function dnsResponse(
     headers: {
       "content-type": "application/dns-message",
       "cache-control": `max-age=${Math.max(0, Math.floor(ttl))}`,
+      // Service-identity header (borrowed from NextDNS-DOH): makes it obvious
+      // which proxy layer produced the response when debugging multi-hop setups.
+      "x-proxied-by": "cf-doh",
       ...corsHeaders(),
       ...debugHeaders,
     },
@@ -53,6 +59,7 @@ export function jsonResponse(
     headers: {
       "content-type": "application/dns-json",
       "cache-control": `max-age=${Math.max(0, Math.floor(ttl))}`,
+      "x-proxied-by": "cf-doh",
       ...corsHeaders(),
       ...debugHeaders,
     },

@@ -83,7 +83,7 @@ JSON API（Google DoH JSON 兼容）行为：
 | `MODE` | `failover` | `failover`（顺序，省连接）/ `strict`（并行 fan-out ≤6 上游，取最严格结果，适合过滤） |
 | `REBIND_PROTECTION` | `off` | `on` 时若响应全部指向私网 IP，则返回合成 NXDOMAIN |
 | `TTL_FLOOR` / `TTL_CEIL` | `0` / `86400` | 缓存 TTL 夹取范围（秒）。**`TTL_FLOOR` 不再把缓存新鲜度抬过 DNS 权威 TTL**（权威 TTL 是新鲜度上限）；保留该变量仅为配置兼容，建议保持 `0` |
-| `TTL_JITTER` | `0.1` | 0~1，缓存 TTL 抖动比例，防缓存雪崩 |
+| `TTL_JITTER` | `0.1` | 0~1，缓存 TTL 抖动比例，防缓存雪崩。**确定性抖动**：按缓存键哈希推导（同一条目在所有隔离区 TTL 一致，避免 Cache API 条目被不同 max-age 碎片化） |
 | `MAX_RETRIES` | `1` | 上游 5xx/网络错误/超时的额外重试次数（总尝试数受 50 次 subrequest 平台上限约束，自动 clamp） |
 | `TIMEOUT_MS` | `3000` | 单次上游超时（覆盖 fetch + body 读取 + 校验） |
 | `TOTAL_TIMEOUT_MS` | `10000` | 整个解析（含 failover/重试）的总墙钟预算；每次尝试取 `min(TIMEOUT_MS, 剩余)` |
@@ -92,6 +92,12 @@ JSON API（Google DoH JSON 兼容）行为：
 | `DOH_AGGREGATE_ALLOWLIST` | 空（开放） | 可选：逗号分隔的 hostname 白名单，限制首页 `/?doh=<目标>` 聚合端点可转发的目标。为空保持原版开放行为（前端自定义 DoH 选项可用）；设置后仅白名单内的 DoH 主机可被聚合查询 |
 | `ROOT_CONTENT` / `URL302` | 空 | 首页伪装（HTML 或 302 跳转） |
 | `DEBUG` | `off` | 开启 `X-DOH-*` 诊断响应头 |
+
+## 响应头
+
+- **CORS**：`Access-Control-Allow-*` + `Access-Control-Max-Age: 86400`（预检结果缓存 1 天，浏览器跨域客户端省掉每次查询的 OPTIONS 往返）
+- **`X-Proxied-By: cf-doh`**：服务标识头（排障时明确响应由哪个代理层产生）
+- **`X-DOH-*`**（`DEBUG=true` 时）：缓存命中/未命中、ECS 桶、上游序号、TTL
 
 ## 资源预算（Cloudflare 免费档）
 

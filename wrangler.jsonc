@@ -5,5 +5,12 @@
   "compatibility_flags": [],
   "observability": {
     "enabled": true
+  },
+  // Smart Placement: run near the upstream resolvers (not the client) to cut
+  // cross-ocean RTT on the upstream hop (borrowed from doh-cf-workers). For a
+  // personal resolver with far-away upstreams the net gain is positive; the
+  // client-side hop is one extra edge round-trip either way.
+  "placement": {
+    "mode": "smart"
   }
 }
