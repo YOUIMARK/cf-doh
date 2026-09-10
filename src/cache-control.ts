@@ -8,7 +8,12 @@
  *   SERVFAIL / REFUSED / other RCODE (incl. extended) -> no-store
  *   POST / ECS-sensitive / invalid response -> no-store
  *
- * The serve-stale window never exceeds the entry's own TTL (bounded at 60s).
+ * Deliberately NO `stale-while-revalidate`: a DNS record's TTL is a HARD
+ * expiry (RFC 1035 §3.2.1: "the time interval that the resource record may
+ * be cached before it should be discarded"). Serving stale DNS past the TTL
+ * would hand clients answers older than the record's own lifetime — the CDN
+ * must refetch once s-maxage elapses, never extend it with a serve-stale
+ * window (user-confirmed policy, mirrors vercel-doh).
  */
 
 export interface CacheControlInput {
@@ -41,6 +46,5 @@ export function buildCacheControl(input: CacheControlInput): string {
   if (ttl === null) return "no-store";
 
   const capped = Math.max(0, Math.min(ttl, input.cacheMaxAge));
-  const stale = Math.max(0, Math.min(60, capped));
-  return `public, s-maxage=${capped}, stale-while-revalidate=${stale}`;
+  return `public, s-maxage=${capped}`;
 }

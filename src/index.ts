@@ -36,7 +36,7 @@ import { padResponse } from "./dns/padding";
 import { buildCacheControl } from "./cache-control";
 import { acceptsMediaType, parseMediaType } from "./media";
 import { checkAdmin, checkAuth } from "./auth";
-import { corsHeaders, dnsResponse, jsonError, ok204 } from "./response";
+import { corsHeaders, dnsResponse, jsonError, ok204, securityHeaders } from "./response";
 import { renderHomepage } from "./frontend.js";
 
 export interface Env {
@@ -238,6 +238,13 @@ async function handleDoh(
     // NextDNS-DOH's parseDnsRequest pre-check.
     if (dnsParam.length > Math.ceil((cfg.maxBody * 4) / 3) + 2) {
       return jsonError(413, "query too large");
+    }
+    // RFC 8484 §4.1: the dns= parameter MUST be unpadded base64url. Reject
+    // legacy padded / standard-base64 forms ("=", "+", "/") and the
+    // impossible length % 4 == 1 outright instead of tolerating them
+    // (mirrors vercel-doh's strictness).
+    if (!/^[A-Za-z0-9_-]+$/.test(dnsParam) || dnsParam.length % 4 === 1) {
+      return jsonError(400, "invalid dns parameter (base64url, unpadded)");
     }
     const decoded = base64urlToBytes(dnsParam);
     if (!decoded) return jsonError(400, "invalid dns parameter (base64url)");
@@ -723,7 +730,7 @@ function debugHeaders(
 function handleHealth(request: Request, cfg: Config): Response {
   if (!checkAdmin(request, cfg)) return jsonError(401, "unauthorized");
   return new Response(JSON.stringify({ status: "ok", ts: Date.now() }), {
-    headers: { "content-type": "application/json", ...corsHeaders() },
+    headers: { "content-type": "application/json", ...corsHeaders(), ...securityHeaders() },
   });
 }
 
@@ -756,7 +763,7 @@ function handleConfig(request: Request, cfg: Config): Response {
     appVersion: cfg.appVersion,
   };
   return new Response(JSON.stringify(body, null, 2), {
-    headers: { "content-type": "application/json", ...corsHeaders() },
+    headers: { "content-type": "application/json", ...corsHeaders(), ...securityHeaders() },
   });
 }
 
@@ -822,10 +829,33 @@ function qList(v: unknown): unknown[] {
   return [];
 }
 
+/** Record types accepted by the aggregate endpoint (vercel-doh proxy parity). */
+const AGGREGATE_TYPES = new Set([
+  "ALL", "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV",
+  "CAA", "HTTPS", "SVCB", "DS", "DNSKEY", "TLSA", "ANY",
+]);
+
 async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
   const domain = url.searchParams.get("domain") || url.searchParams.get("name") || "www.google.com";
   const dohParam = url.searchParams.get("doh") || "";
   const type = url.searchParams.get("type") || "all";
+
+  // Input validation (vercel-doh /dns-query-proxy parity): bounded domain,
+  // whitelisted type. The original cmliu defaults are kept for missing params.
+  if (domain.length > MAX_DOMAIN_TEXT || !DOMAIN_CHARS.test(domain)) {
+    return new Response(JSON.stringify({ error: "invalid domain" }, null, 2), {
+      status: 400,
+      headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() },
+    });
+  }
+  const qtype = type.toUpperCase();
+  if (!AGGREGATE_TYPES.has(qtype)) {
+    return new Response(JSON.stringify({ error: `unsupported type: ${type}` }, null, 2), {
+      status: 400,
+      headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() },
+    });
+  }
+
   const isLocal = dohParam.includes(url.host);
   // Local target → our own dns-json upstream; remote target must be https.
   let base: string;
@@ -849,12 +879,12 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
     } catch (err) {
       return new Response(
         JSON.stringify({ error: `无效的 DoH 地址: ${err instanceof Error ? err.message : String(err)}` }, null, 2),
-        { status: 400, headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() } },
+        { status: 400, headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() } },
       );
     }
   }
   try {
-    if (type === "all") {
+    if (qtype === "ALL") {
       const [a, aaaa, ns] = await Promise.all([
         queryDnsJson(base, domain, "A").catch(() => ({ Answer: [], Question: [] })),
         queryDnsJson(base, domain, "AAAA").catch(() => ({ Answer: [], Question: [] })),
@@ -877,17 +907,17 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
         ns: { records: nsRecords },
       };
       return new Response(JSON.stringify(combined, null, 2), {
-        headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() },
+        headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() },
       });
     }
-    const result = await queryDnsJson(base, domain, type);
+    const result = await queryDnsJson(base, domain, qtype);
     return new Response(JSON.stringify(result, null, 2), {
-      headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() },
+      headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() },
     });
   } catch (err) {
     return new Response(
       JSON.stringify({ error: `DNS 查询失败: ${err instanceof Error ? err.message : String(err)}`, doh: base, domain }, null, 2),
-      { status: 500, headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders() } },
+      { status: 500, headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() } },
     );
   }
 }
@@ -935,7 +965,7 @@ async function handleIpInfo(request: Request): Promise<Response> {
       query: ip,
     };
     return new Response(JSON.stringify(out), {
-      headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders() },
+      headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders(), ...securityHeaders() },
     });
   } catch (err) {
     return new Response(
@@ -944,7 +974,7 @@ async function handleIpInfo(request: Request): Promise<Response> {
         message: `IP查询失败: ${err instanceof Error ? err.message : String(err)}`,
         query: ip,
       }),
-      { status: 502, headers: { "content-type": "application/json", ...corsHeaders() } },
+      { status: 502, headers: { "content-type": "application/json", ...corsHeaders(), ...securityHeaders() } },
     );
   }
 }
@@ -991,6 +1021,7 @@ ${endpointLine}
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "public, s-maxage=60",
+      ...securityHeaders(),
     },
   });
 }

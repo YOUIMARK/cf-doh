@@ -14,6 +14,16 @@ export function corsHeaders(): Record<string, string> {
   };
 }
 
+/** Security headers on every response (vercel-doh applies them site-wide via
+ *  vercel.json; Workers responses must set them per-response). */
+export function securityHeaders(): Record<string, string> {
+  return {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+  };
+}
+
 export function jsonError(status: number, message: string): Response {
   return new Response(JSON.stringify({ error: message }), {
     status,
@@ -21,12 +31,13 @@ export function jsonError(status: number, message: string): Response {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       ...corsHeaders(),
+      ...securityHeaders(),
     },
   });
 }
 
 export function ok204(): Response {
-  return new Response(null, { status: 204, headers: corsHeaders() });
+  return new Response(null, { status: 204, headers: { ...corsHeaders(), ...securityHeaders() } });
 }
 
 /** Build a DoH response with an explicit cache lifetime. */
@@ -44,6 +55,7 @@ export function dnsResponse(
       // which proxy layer produced the response when debugging multi-hop setups.
       "x-proxied-by": "cf-doh",
       ...corsHeaders(),
+      ...securityHeaders(),
       ...debugHeaders,
     },
   });
@@ -64,6 +76,7 @@ export function jsonResponse(
       "cache-control": `max-age=${Math.max(0, Math.floor(ttl))}`,
       "x-proxied-by": "cf-doh",
       ...corsHeaders(),
+      ...securityHeaders(),
       ...debugHeaders,
     },
   });

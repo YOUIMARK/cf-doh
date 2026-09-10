@@ -29,7 +29,8 @@ export function renderHomepage(cfg: Config): Response {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DNS-over-HTTPS Resolver</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+    integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM" crossorigin="anonymous">
   <style>
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -197,7 +198,8 @@ export function renderHomepage(cfg: Config): Response {
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
   <script>
     // cmliu/CF-Workers-DoH inline script, ported verbatim. Only the
     // geolocation source changed (ipwho.is over HTTPS, see queryIpGeoInfo)
@@ -480,6 +482,17 @@ export function renderHomepage(cfg: Config): Response {
       "x-content-type-options": "nosniff",
       "x-frame-options": "DENY",
       "referrer-policy": "no-referrer",
+      // Defense-in-depth (vercel-doh parity): pin scripts/styles to self +
+      // the SRI-checked CDN, allow the browser geo lookup (ipwho.is) and the
+      // Cloudflare background asset, and lock framing.
+      "content-security-policy":
+        "default-src 'self'; " +
+        "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; " +
+        "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; " +
+        "img-src 'self' https: data:; " +
+        "connect-src 'self' https://ipwho.is; " +
+        "font-src 'self' https://cdn.jsdelivr.net data:; " +
+        "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
     },
   });
 }

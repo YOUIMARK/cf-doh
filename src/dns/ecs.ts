@@ -12,6 +12,7 @@
 import { countOptRrs, parseSections, toView } from "./wire";
 import { parseIp } from "./encode";
 import { isPrivateOrReserved, type IpAddress } from "./ip";
+import { type EcsOption } from "./parse";
 
 export const ECS_OPTION_CODE = 8;
 export const OPT_RR_TYPE = 41;
@@ -68,12 +69,13 @@ export function ecsStatus(msg: Uint8Array): EcsStatus {
 }
 
 /**
- * Query-side ECS rule (RFC 7871 §7.1.2): in a client QUERY the ECS SCOPE
- * prefix length MUST be 0 — a nonzero scope is meaningless in a question and
- * indicates a broken/hostile client. Responses legitimately carry scope > 0,
- * so this check belongs to the query gate only. Returns true when there is no
- * ECS to check or the message is structurally malformed (ecsStatus handles
- * that separately).
+ * Query-side ECS rules (RFC 7871 §7.1.1/§7.1.2): in a client QUERY the ECS
+ * SCOPE prefix length MUST be 0 and the address bits beyond the source
+ * prefix MUST be zero — a nonzero scope or dirty trailing bits indicate a
+ * broken/hostile client. Responses legitimately carry scope > 0 (and may
+ * echo a truncated address), so these checks belong to the query gate only.
+ * Returns true when there is no ECS to check or the message is structurally
+ * malformed (ecsStatus handles that separately).
  */
 export function queryEcsScopeValid(msg: Uint8Array): boolean {
   const parsed = parseSections(msg);
@@ -90,11 +92,50 @@ export function queryEcsScopeValid(msg: Uint8Array): boolean {
       if (code === ECS_OPTION_CODE) {
         if (len < 4) return true;
         if (view.getUint8(o + 7) !== 0) return false; // scope must be 0 in a query
+        // RFC 7871 §7.1.1: bits beyond the source prefix MUST be zero.
+        // (family/sourcePrefix bounds and the exact option length are
+        // already enforced by ecsStatus before this runs.)
+        const family = view.getUint16(o + 4);
+        const sourcePrefix = view.getUint8(o + 6);
+        const remBits = sourcePrefix % 8;
+        if (remBits !== 0 && (family === 1 || family === 2)) {
+          const addrLen = Math.ceil(sourcePrefix / 8);
+          const lastByte = view.getUint8(o + 8 + addrLen - 1);
+          if ((lastByte & (0xff << (8 - remBits))) !== lastByte) return false;
+        }
       }
       o += 4 + len;
     }
   }
   return true;
+}
+
+/** Returns the first ECS option of a message, or null when absent/malformed. */
+export function findEcs(msg: Uint8Array): EcsOption | null {
+  if (ecsStatus(msg) === "malformed") return null;
+  const parsed = parseSections(msg);
+  if (!parsed) return null;
+  const view = toView(msg);
+  for (const opt of parsed.additional.rrs) {
+    if (opt.rrType !== OPT_RR_TYPE) continue;
+    const end = opt.rdataOffset + opt.rdLength;
+    let o = opt.rdataOffset;
+    while (o + 4 <= end) {
+      const code = view.getUint16(o);
+      const len = view.getUint16(o + 2);
+      if (o + 4 + len > end) return null;
+      if (code === ECS_OPTION_CODE && len >= 4) {
+        const family = view.getUint16(o + 4);
+        const sourcePrefix = view.getUint8(o + 6);
+        const scopePrefix = view.getUint8(o + 7);
+        const address = new Uint8Array(len - 4);
+        for (let i = 0; i < len - 4; i++) address[i] = view.getUint8(o + 8 + i);
+        return { family, sourcePrefix, scopePrefix, address };
+      }
+      o += 4 + len;
+    }
+  }
+  return null;
 }
 
 /** Builds the ECS option wire bytes (option code + option data). */
@@ -111,6 +152,14 @@ export function buildEcsOption(ip: IpAddress, prefixLength: number): Uint8Array 
   view.setUint8(6, prefix);
   view.setUint8(7, 0); // SCOPE PREFIX-LENGTH
   out.set(ip.bytes.subarray(0, addrLen), 8);
+  // RFC 7871 §7.1.1: bits beyond the source prefix MUST be zero. For a
+  // non-octet prefix (e.g. /21) the raw address byte carries real host bits
+  // below the prefix — mask them off or the option is non-canonical
+  // (mirrors vercel-doh).
+  const remBits = prefix % 8;
+  if (remBits !== 0 && addrLen > 0) {
+    out[8 + addrLen - 1] = (out[8 + addrLen - 1] ?? 0) & (0xff << (8 - remBits));
+  }
   return out;
 }
 

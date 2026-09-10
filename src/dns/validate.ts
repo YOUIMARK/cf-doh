@@ -23,7 +23,7 @@ import {
   toView,
   type DnsHeader,
 } from "./wire";
-import { ecsStatus, queryEcsScopeValid } from "./ecs";
+import { ecsStatus, findEcs, queryEcsScopeValid } from "./ecs";
 
 export interface ValidatedResponse {
   header: DnsHeader;
@@ -45,7 +45,16 @@ export function validateQuery(msg: Uint8Array): boolean {
   return queryEcsScopeValid(msg); // RFC 7871: query ECS scope MUST be 0
 }
 
-/** Validates an upstream response; returns null when it cannot be trusted. */
+/**
+ * Validates an upstream response; returns null when it cannot be trusted.
+ *
+ * EDNS(0)/ECS is part of the trust boundary: a structurally broken OPT option
+ * set rejects the response outright, and when the response carries an ECS
+ * option the FAMILY / SOURCE PREFIX-LENGTH / address bits must echo the
+ * request's ECS (RFC 7871 §7.2.1) — a response claiming a different subnet
+ * than we sent is not trustworthy. (A response WITHOUT ECS is always
+ * accepted: resolvers may omit it. A non-zero response SCOPE is legal.)
+ */
 export function validateResponse(
   msg: Uint8Array,
   request?: Uint8Array,
@@ -66,6 +75,27 @@ export function validateResponse(
     if (rr.offset - rr.nameStart !== 1 || msg[rr.nameStart] !== 0) return null;
   }
   if (!checkRdataTypes(view, sections)) return null;
+  if (ecsStatus(msg) === "malformed") return null; // broken EDNS/ECS option structure
   if (request && !questionMatches(msg, request)) return null; // ID + question echo
+  if (request && !ecsEchoMatches(msg, request)) return null; // RFC 7871 §7.2.1
   return { header, rcode: extendedRcode(msg) };
+}
+
+/**
+ * RFC 7871 §7.2.1 consistency: when the response carries an ECS option it
+ * MUST echo the FAMILY, SOURCE PREFIX-LENGTH and address (prefix bits) of the
+ * request's ECS. Responses without ECS (or for requests without ECS) always
+ * pass — omitting ECS is a resolver's right; inventing a mismatched one is not.
+ */
+function ecsEchoMatches(response: Uint8Array, request: Uint8Array): boolean {
+  const respEcs = findEcs(response);
+  if (!respEcs) return true;
+  const reqEcs = findEcs(request);
+  if (!reqEcs) return true; // response ECS without a request ECS → tolerated (still sensitive downstream)
+  if (respEcs.family !== reqEcs.family || respEcs.sourcePrefix !== reqEcs.sourcePrefix) return false;
+  const addrLen = Math.ceil(reqEcs.sourcePrefix / 8);
+  for (let i = 0; i < addrLen; i++) {
+    if ((respEcs.address[i] ?? 0) !== (reqEcs.address[i] ?? 0)) return false;
+  }
+  return true;
 }
