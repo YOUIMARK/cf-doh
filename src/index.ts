@@ -857,10 +857,15 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
         queryDnsJson(base, domain, "NS").catch(() => ({ Answer: [], Authority: [], Question: [] })),
       ]);
       const nsRecords: unknown[] = [];
+      // The NS tab lists nameservers, so collect NS (2) from Answer and
+      // Authority only. SOA (6) — which NODATA responses carry in Authority
+      // (e.g. a subdomain like `cf.api.fan` that is not a delegation point) —
+      // is not a nameserver; including it used to leak the parent zone's SOA
+      // RDATA ("…serial refresh retry expire minimum") into the NS list.
       for (const r of qList(ns.Answer)) if ((r as { type?: number }).type === 2) nsRecords.push(r);
       for (const r of qList(ns.Authority)) {
         const t = (r as { type?: number }).type;
-        if (t === 2 || t === 6) nsRecords.push(r);
+        if (t === 2) nsRecords.push(r);
       }
       const aRec = qList(a.Answer);
       const aaaaRec = qList(aaaa.Answer);
