@@ -273,7 +273,7 @@ async function handleDoh(
   const shouldAddEcs = effectiveBehavior === "force_enable";
   if (shouldAddEcs && ecsStatus(message) === "absent") {
     const overrideIp = flags.ecsOverrideIp ?? cfg.ecsOverrideIp;
-    const sourceIp = overrideIp ? parseOverrideIp(overrideIp) : parseClientIp(request.headers);
+    const sourceIp = overrideIp ? parseOverrideIp(overrideIp, cfg) : parseClientIp(request.headers);
     if (sourceIp) {
       const prefix = sourceIp.family === 1 ? cfg.ecsV4 : cfg.ecsV6;
       const merged = addOrMergeEcs(message, buildEcsOption(sourceIp, prefix));
@@ -399,11 +399,13 @@ async function handleDoh(
   });
 }
 
-/** Parses an override IP for ECS injection (family from the literal). */
-function parseOverrideIp(ip: string): ReturnType<typeof parseClientIp> {
-  const bits = ip.includes(":") ? 56 : 24;
-  const t = truncateIp(ip, bits);
-  return t;
+/** Parses an override IP for ECS injection (family from the literal, prefix
+ *  length from the configured ECS_V4/ECS_V6 — truncating with a hardcoded
+ *  default while claiming the configured prefix would send a wrong subnet,
+ *  e.g. 1.2.3.0/28 instead of 1.2.3.192/28). */
+function parseOverrideIp(ip: string, cfg: Config): ReturnType<typeof parseClientIp> {
+  const bits = ip.includes(":") ? cfg.ecsV6 : cfg.ecsV4;
+  return truncateIp(ip, bits);
 }
 
 // ── dns-json API ───────────────────────────────────────────────────────────
@@ -609,6 +611,11 @@ async function handleJson(
   const qtype = params.get("type") ?? "A";
 
   // ECS-sensitive JSON responses are client-specific — never shared-cached.
+  // cd/do change the upstream answer's DNSSEC content (RRSIG records, checking
+  // behavior), so their normalized values must be part of the cache key: a
+  // do=1 response must never be served to a plain request from cache (R3-01).
+  const doFlag = /^(1|true)$/i.test(params.get("do") ?? "") ? 1 : 0;
+  const cdFlag = /^(1|true)$/i.test(params.get("cd") ?? "") ? 1 : 0;
   let cacheKey: string | null = null;
   if (!ecsSensitive) {
     cacheKey = await makeCacheKeyStr({
@@ -617,7 +624,7 @@ async function handleJson(
       qclass: 0,
       modeKey: "j",
       ecsBucket: "none",
-      typeTag: qtype.trim().toLowerCase(),
+      typeTag: `${qtype.trim().toLowerCase()}|do=${doFlag}|cd=${cdFlag}`,
     });
     const local = cache.getLocal(cacheKey);
     if (local) {
