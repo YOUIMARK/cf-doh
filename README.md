@@ -76,10 +76,11 @@ JSON API（Google DoH JSON 兼容）行为：
 | `SHOW_DOH_ENDPOINT` | `false` | `true` 时端点信息页（浏览器直接访问 DoH 基路径）展示 DoH 端点 URL；默认隐藏（路径混淆不泄露） |
 | `JSON_PATH` | 空（关） | 启用 Google 风格 JSON API（如 `/resolve`） |
 | `JSON_UPSTREAM` | `https://dns.google/resolve` | JSON API 上游 |
-| `AUTH_TOKEN` | 空（关） | 设置后需 `Authorization: Bearer <token>`、`?token=` 或 `X-DOH-Token`。**推荐使用 `Authorization: Bearer`**；`?token=` 会进入访问日志/浏览器历史/Referer，仅保留作兼容 |
+| `AUTH_TOKEN` | 空（关） | 设置后需 `Authorization: Bearer <token>`、`?token=` 或 `X-DOH-Token`。**推荐使用 `Authorization: Bearer`**；`?token=` 会进入访问日志/浏览器历史/Referer，仅保留作兼容。注意：首页聚合端点 `/?doh=<目标>` 是前端原版的匿名查询路径（浏览器 fetch 不带凭据），不受 `AUTH_TOKEN` 保护；本站目标会直接走 `JSON_UPSTREAM` 解析 |
 | `ADMIN_TOKEN` | 空（关） | 保护 `/config` 与 `/health`。公开部署请务必设置：为空 = 管理端点公开 |
 | `ECS` | `off` | `on` 时注入 EDNS Client Subnet（并截断）；`off` 时剥离客户端 ECS 不外泄 |
-| `ECS_V4` / `ECS_V6` | `24` / `56` | ECS 前缀长度 |
+| `ECS_V4` / `ECS_V6` | `24` / `56` | ECS 前缀长度（同时作用于自动注入与 `/ecs-<ip>` 覆盖截断） |
+| `ECS_UPSTREAM_URLS` | `https://dns.google/dns-query` | 逗号分隔的 ECS 查询上游（请求携带或代理注入了 ECS 时改走此列表）。默认 Google 是有意为之：Cloudflare 解析器忽略 ECS，dns.google 支持；设为与 `UPSTREAM_URLS` 相同值可让 ECS 查询跟随主上游（过滤型上游须自身支持 ECS） |
 | `MODE` | `failover` | `failover`（顺序，省连接）/ `strict`（并行 fan-out ≤6 上游，取最严格结果，适合过滤） |
 | `REBIND_PROTECTION` | `off` | `on` 时若响应全部指向私网 IP，则返回合成 NXDOMAIN |
 | `TTL_FLOOR` / `TTL_CEIL` | `0` / `86400` | 缓存 TTL 夹取范围（秒）。**`TTL_FLOOR` 不再把缓存新鲜度抬过 DNS 权威 TTL**（权威 TTL 是新鲜度上限）；保留该变量仅为配置兼容，建议保持 `0` |

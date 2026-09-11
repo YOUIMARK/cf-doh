@@ -225,6 +225,21 @@ function parseOptionalIp(v: string | undefined): string | null {
   return trimmed;
 }
 
+/** JSON API upstream: https-only, validated at startup — the same SSRF rule
+ *  as the DoH upstreams (plain-text DNS JSON must not be silently accepted). */
+function parseJsonUpstream(v: string | undefined): string | null {
+  if (v === undefined || v.trim() === "") return null;
+  const s = pick(v, "https://dns.google/resolve");
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    throw new Error(`invalid JSON_UPSTREAM: ${s}`);
+  }
+  if (u.protocol !== "https:") throw new Error(`JSON_UPSTREAM must be https: ${s}`);
+  return s;
+}
+
 export function parseConfig(env: Record<string, string | undefined>): Config {
   const modeRaw = pick(env["MODE"], "failover").toLowerCase();
   if (modeRaw !== "failover" && modeRaw !== "strict") {
@@ -239,7 +254,7 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
     ecsUpstreamUrls: parseUpstreams(env["ECS_UPSTREAM_URLS"], ["https://dns.google/dns-query"]),
     dohPath: parseDohPath(env["DOH_PATH"]),
     jsonPath: env["JSON_PATH"] && env["JSON_PATH"].trim() !== "" ? normPath(env["JSON_PATH"], "/dns-query.json") : null,
-    jsonUpstream: env["JSON_UPSTREAM"] && env["JSON_UPSTREAM"].trim() !== "" ? pick(env["JSON_UPSTREAM"], "https://dns.google/resolve") : null,
+    jsonUpstream: parseJsonUpstream(env["JSON_UPSTREAM"]),
     authToken: env["AUTH_TOKEN"] && env["AUTH_TOKEN"].trim() !== "" ? env["AUTH_TOKEN"] : null,
     adminToken: env["ADMIN_TOKEN"] && env["ADMIN_TOKEN"].trim() !== "" ? env["ADMIN_TOKEN"] : null,
     ecs: bool(env["ECS"], false),
