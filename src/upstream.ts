@@ -16,6 +16,7 @@
 
 import { HEADER_LEN } from "./dns/parse";
 import { parseMediaType } from "./media";
+import { readStreamBounded } from "./read-body";
 import { validateResponse } from "./dns/validate";
 import type { Config } from "./config";
 
@@ -159,9 +160,11 @@ async function tryProvider(
       await resp.body?.cancel().catch(() => undefined);
       return null;
     }
-    // Body read + validation happen INSIDE the timed region.
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    if (buf.byteLength < HEADER_LEN || buf.byteLength > ctx.maxBody) return null;
+    // Body read + validation happen INSIDE the timed region. The read is
+    // bounded mid-stream: a chunked/lying upstream must not get buffered
+    // whole before the MAX_BODY check (R4-03).
+    const buf = await readStreamBounded(resp.body, ctx.maxBody);
+    if (buf === null || buf.byteLength < HEADER_LEN) return null;
     // Trust boundary: the response must validate AND echo the request sent.
     const validated = validateResponse(buf, requestMessage);
     if (!validated) return null;

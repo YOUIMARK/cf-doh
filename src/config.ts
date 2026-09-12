@@ -240,6 +240,17 @@ function parseJsonUpstream(v: string | undefined): string | null {
   return s;
 }
 
+/** Homepage/info-page version string. It is interpolated into HTML, so it
+ *  must be a short safe charset (semver fits); anything else fails fast
+ *  instead of allowing markup into the pages (mirrors vercel-doh). */
+function parseAppVersion(v: string | undefined): string {
+  const s = pick(v, "1.0.0");
+  if (s.length > 64 || !/^[A-Za-z0-9._+-]+$/.test(s)) {
+    throw new Error("invalid APP_VERSION: expected 1..64 chars of [A-Za-z0-9._+-]");
+  }
+  return s;
+}
+
 export function parseConfig(env: Record<string, string | undefined>): Config {
   const modeRaw = pick(env["MODE"], "failover").toLowerCase();
   if (modeRaw !== "failover" && modeRaw !== "strict") {
@@ -281,6 +292,6 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
     rootContent: env["ROOT_CONTENT"] && env["ROOT_CONTENT"].trim() !== "" ? env["ROOT_CONTENT"] : null,
     url302: env["URL302"] && env["URL302"].trim() !== "" ? env["URL302"] : null,
     debug: bool(env["DEBUG"], false),
-    appVersion: pick(env["APP_VERSION"], "1.0.0"),
+    appVersion: parseAppVersion(env["APP_VERSION"]),
   };
 }
