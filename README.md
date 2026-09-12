@@ -84,6 +84,7 @@ JSON API（Google DoH JSON 兼容）行为：
 | `MODE` | `failover` | `failover`（顺序，省连接）/ `strict`（并行 fan-out ≤6 上游，取最严格结果，适合过滤） |
 | `REBIND_PROTECTION` | `off` | `on` 时若响应全部指向私网 IP，则返回合成 NXDOMAIN |
 | `TTL_FLOOR` / `TTL_CEIL` | `0` / `86400` | 缓存 TTL 夹取范围（秒）。**`TTL_FLOOR` 不再把缓存新鲜度抬过 DNS 权威 TTL**（权威 TTL 是新鲜度上限）；保留该变量仅为配置兼容，建议保持 `0` |
+| `CACHE_MAX_AGE` | `300` | DoH GET 成功应答的 `s-maxage` 上限（秒）；设为 `0` 产生 `s-maxage=0`，效果等同禁止共享缓存；JSON API 的缓存上限由 `TTL_CEIL` 控制 |
 | `TTL_JITTER` | `0.1` | 0~1，缓存 TTL 抖动比例，防缓存雪崩。**确定性抖动**：按缓存键哈希推导（同一条目在所有隔离区 TTL 一致，避免 Cache API 条目被不同 max-age 碎片化） |
 | `MAX_RETRIES` | `1` | 上游 5xx/网络错误/超时的额外重试次数（总尝试数受 50 次 subrequest 平台上限约束，自动 clamp） |
 | `TIMEOUT_MS` | `3000` | 单次上游超时（覆盖 fetch + body 读取 + 校验） |
