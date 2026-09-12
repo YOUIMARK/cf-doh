@@ -34,6 +34,7 @@ import { formatEcsPrefix, parseCidr } from "./dns/ip";
 import { validateQuery } from "./dns/validate";
 import { padResponse } from "./dns/padding";
 import { buildCacheControl } from "./cache-control";
+import { readStreamBounded, readTextBounded } from "./read-body";
 import { acceptsMediaType, parseMediaType } from "./media";
 import { checkAdmin, checkAuth } from "./auth";
 import { corsHeaders, dnsResponse, jsonError, ok204, securityHeaders } from "./response";
@@ -227,9 +228,11 @@ async function handleDoh(
     if (parseMediaType(contentType) !== DNS_MESSAGE) {
       return jsonError(415, "unsupported content type");
     }
-    const raw = await request.arrayBuffer();
-    if (raw.byteLength > cfg.maxBody) return jsonError(413, "query too large");
-    message = new Uint8Array(raw);
+    // Bounded streaming read (R4-02): a chunked/lying POST must be cut off
+    // mid-stream, not buffered whole before the size check runs.
+    const raw = await readStreamBounded(request.body, cfg.maxBody);
+    if (raw === null) return jsonError(413, "query too large");
+    message = raw;
   } else {
     const dnsParam = url.searchParams.get("dns") ?? "";
     // Reject by the base64url expansion ratio BEFORE decoding: an attacker
@@ -657,8 +660,8 @@ async function handleJson(
       return jsonError(502, "upstream unavailable");
     }
     if (resp.status < 200 || resp.status >= 300) return jsonError(502, "upstream error");
-    const body = new Uint8Array(await resp.arrayBuffer());
-    if (body.byteLength > cfg.maxBody) return jsonError(502, "upstream response too large");
+    const body = await readStreamBounded(resp.body, cfg.maxBody);
+    if (body === null) return jsonError(502, "upstream response too large");
 
     // Upstream responses must parse as a valid dns-json schema; anything
     // else is treated as an upstream failure (502), never cached.
@@ -668,8 +671,9 @@ async function handleJson(
     // TTL policy (mirrors vercel-doh's jsonCacheControl):
     //  - Status 0 with answers   → min Answer TTL
     //  - NXDOMAIN / NODATA       → RFC 2308 negative TTL: min(SOA TTL,
-    //    SOA.MINIMUM) derived from the SOA record's data string; falling
-    //    back to the min Authority TTL when the SOA cannot be parsed
+    //    SOA.MINIMUM) derived from the SOA record's data string. No SOA →
+    //    no cache, exactly like the wire path (R4-04: an Authority-TTL
+    //    fallback would cache negatives on the wrong clock).
     //  - anything else, or no usable TTL → do not cache (CF-012)
     // ECS-sensitive responses are never shared-cached.
     let ttl = 0;
@@ -677,7 +681,7 @@ async function handleJson(
       const status = typeof parsed.Status === "number" ? parsed.Status : -1;
       if (status === 0 || status === 3) {
         const answerTtl = minJsonTtl(parsed.Answer);
-        const negativeTtl = soaJsonNegativeTtl(parsed.Authority) ?? minJsonTtl(parsed.Authority);
+        const negativeTtl = soaJsonNegativeTtl(parsed.Authority);
         if (status === 0 && answerTtl !== null) ttl = answerTtl;
         else if (negativeTtl !== null) ttl = negativeTtl;
       }
@@ -789,10 +793,14 @@ async function queryDnsJson(
   dohServer: string,
   domain: string,
   type: string,
+  maxBody: number,
 ): Promise<Record<string, unknown>> {
   // Ported 1:1 from cmliu/CF-Workers-DoH `queryDns`: default fetch (follows
   // redirects, no artificial timeout — the original has neither), trying
-  // several Accept header combinations.
+  // several Accept header combinations. The only delta from the original is
+  // the bounded body read: the aggregate endpoint is anonymously reachable
+  // with an attacker-chosen https target (accepted R3-05 design), so the
+  // response must be cut off at MAX_BODY instead of buffered whole (R4-01).
   const dohUrl = new URL(dohServer);
   dohUrl.searchParams.set("name", domain);
   dohUrl.searchParams.set("type", type);
@@ -807,19 +815,20 @@ async function queryDnsJson(
     try {
       const resp = await fetch(dohUrl.toString(), { headers });
       if (resp.ok) {
+        const text = await readTextBounded(resp.body, maxBody);
+        if (text === null) throw new Error("DoH 响应超过大小上限");
         const contentType = resp.headers.get("content-type") || "";
         if (contentType.includes("json") || contentType.includes("dns-json")) {
-          return (await resp.json()) as Record<string, unknown>;
+          return JSON.parse(text) as Record<string, unknown>;
         }
-        const text = await resp.text();
         try {
           return JSON.parse(text) as Record<string, unknown>;
         } catch {
           throw new Error("无法解析响应为JSON");
         }
       }
-      const errorText = await resp.text();
-      lastError = new Error(`DoH 服务器返回错误 (${resp.status}): ${errorText.substring(0, 200)}`);
+      const errorText = await readTextBounded(resp.body, 4096);
+      lastError = new Error(`DoH 服务器返回错误 (${resp.status}): ${(errorText ?? "").substring(0, 200)}`);
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
     }
@@ -893,9 +902,9 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
   try {
     if (qtype === "ALL") {
       const [a, aaaa, ns] = await Promise.all([
-        queryDnsJson(base, domain, "A").catch(() => ({ Answer: [], Question: [] })),
-        queryDnsJson(base, domain, "AAAA").catch(() => ({ Answer: [], Question: [] })),
-        queryDnsJson(base, domain, "NS").catch(() => ({ Answer: [], Authority: [], Question: [] })),
+        queryDnsJson(base, domain, "A", cfg.maxBody).catch(() => ({ Answer: [], Question: [] })),
+        queryDnsJson(base, domain, "AAAA", cfg.maxBody).catch(() => ({ Answer: [], Question: [] })),
+        queryDnsJson(base, domain, "NS", cfg.maxBody).catch(() => ({ Answer: [], Authority: [], Question: [] })),
       ]);
       const nsRecords: unknown[] = [];
       for (const r of qList(ns.Answer)) if ((r as { type?: number }).type === 2) nsRecords.push(r);
@@ -917,7 +926,7 @@ async function handleAggregateQuery(cfg: Config, url: URL): Promise<Response> {
         headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() },
       });
     }
-    const result = await queryDnsJson(base, domain, qtype);
+    const result = await queryDnsJson(base, domain, qtype, cfg.maxBody);
     return new Response(JSON.stringify(result, null, 2), {
       headers: { "content-type": "application/json; charset=UTF-8", ...corsHeaders(), ...securityHeaders() },
     });
